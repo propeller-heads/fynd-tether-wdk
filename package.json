@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.0",
   "private": true,
   "description": "WDK Swidge module for Fynd, the PropellerHeads DEX aggregator",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./index.js",
   "types": "./types/index.d.ts",
@@ -23,7 +23,8 @@
     "README.md",
     "CHANGELOG.md",
     "SECURITY.md",
-    ".env.example"
+    ".env.example",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",

@@ -207,4 +207,4 @@ Tests need Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and loopback ports. They run f
 
 [Source](https://github.com/propeller-heads/fynd-tether-wdk) · [Fynd support](https://t.me/+B4CNQwv7dgIyYTJl) · [Security reports](SECURITY.md)
 
-Copyright 2026 PropellerHeads AG. No license has been granted yet; one will be added before release.
+Copyright 2026 PropellerHeads AG. Licensed under [Apache 2.0](LICENSE).

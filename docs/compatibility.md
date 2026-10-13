@@ -46,7 +46,6 @@ The hosted gateway serves each chain at `/v1/{slug}` and needs an API key. A sel
 
 ## Unresolved
 
-- License: none granted yet.
 - Not yet published to npm.
 - Tether's Generic Implementation Requirements document has not been reviewed.
 - Tether confirmation for exact-input scope, account binding, fee estimates and caps, legacy fees, original-hash status and token discovery semantics.
