@@ -512,6 +512,13 @@ describe('status, discovery and inherited WDK delegates', () => {
     await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ReadOnlyAccountRequiredError' })
   })
 
+  it('checks the Fynd chain before listing its tokens', async () => {
+    const { api, state, fetchMock } = harness({ chainId: 8453 })
+    state.infoPatch = { chain_id: 1 }
+    await expect(api.getSupportedTokens()).rejects.toMatchObject({ reason: 'UNSUPPORTED_ROUTER' })
+    expect(fetchMock.mock.calls.some(([url]) => url.includes('/tokens?'))).toBe(false)
+  })
+
   it('filters token metadata, deduplicates native currency and validates discovery filters', async () => {
     const { api, state } = harness()
     state.tokens.push({ address: ZeroAddress, symbol: 'ETH', decimals: 18, quality: 100, tax: 0 })
@@ -629,7 +636,8 @@ describe('one execution per account', () => {
     }))
     const first = api.swidge(options)
     await vi.waitFor(() => expect(confirm).toBeDefined())
-    const sameAccount = new FyndSwidgeProtocol(account, { chainId: 1 })
+    // A separate WDK account object for the same address shares its nonces.
+    const sameAccount = new FyndSwidgeProtocol({ ...account }, { chainId: 1 })
     for (const protocol of [api, sameAccount]) {
       await expect(protocol.swidge(options)).rejects.toMatchObject({ name: 'SwidgeError', reason: 'EXECUTION_IN_PROGRESS' })
     }

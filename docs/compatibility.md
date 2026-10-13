@@ -18,6 +18,8 @@ ESM JavaScript, JSDoc-generated declarations, Node.js 22+, and a conditional Bar
 
 Strict TypeScript `WDK.registerWallet(..., WalletManagerEvm, ...)` still fails on conflicting private `_seed` declarations, even without Fynd. JavaScript registration works. The type fixtures record this upstream error and check Fynd's constructor, `registerProtocol` and public interfaces.
 
+From an RPC URL string, WDK beta.21 builds `new JsonRpcProvider(url, network, { staticNetwork: true })`, which keeps ethers' 250 ms response cache. Two transactions sent from one account within that window read the same pending nonce, and the second fails or replaces the first. Integrators should pass a provider with `cacheTimeout: -1`. This is a WDK issue, not specific to this module.
+
 WDK has no public `quoteApprove`. The module passes no gas overrides to `approve` or `sendTransaction`; the account's provider sets gas and the transaction chain ID. Configure WDK and Fynd for the same chain; module configuration does not verify the provider's network.
 
 ## Errors and legacy helpers

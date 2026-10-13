@@ -52,6 +52,8 @@ cp .env.example .env
 
 Keep API keys on a backend or behind your own proxy. HTTPS is required except on localhost; URLs cannot contain credentials, queries or fragments. Requests are not retried.
 
+Give WDK an ethers provider with `cacheTimeout: -1`, as in the example below. From an RPC URL string, WDK builds a provider that caches the pending nonce for 250 ms, so back-to-back transactions from one account can reuse a nonce and fail. This affects every WDK module, not only this one.
+
 Configure WDK and the module for the same chain; the module cannot check the account's RPC network. Execution requires an ordinary, non-delegated EVM account that can sign typed data. ERC-4337, paymasters, EIP-7702 and Permit2 are unsupported.
 
 ### Self-hosted Fynd
@@ -65,6 +67,7 @@ Fill `.env`, save this as `wallet.mjs` in the package directory, then run the co
 ```js
 import WDK from '@tetherto/wdk'
 import WalletManagerEvm from '@tetherto/wdk-wallet-evm'
+import { JsonRpcProvider } from 'ethers'
 import FyndSwidgeProtocol, { FyndExecutionError } from '@propellerheads/wdk-protocol-swidge-fynd'
 
 const required = name => {
@@ -76,10 +79,10 @@ const walletName = 'evm'
 const fynd = process.env.FYND_SELF_HOSTED_URL
   ? { selfHostedUrl: process.env.FYND_SELF_HOSTED_URL }
   : { apiKey: required('FYND_API_KEY'), baseUrl: process.env.FYND_BASE_URL || undefined }
+// No response cache, so each transaction reads a fresh nonce.
+const provider = new JsonRpcProvider(required('RPC_URL'), chainId, { staticNetwork: true, cacheTimeout: -1 })
 const wdk = new WDK(required('WDK_SEED_PHRASE'))
-  .registerWallet(walletName, WalletManagerEvm, {
-    provider: required('RPC_URL'), chainId
-  })
+  .registerWallet(walletName, WalletManagerEvm, { provider, chainId })
   .registerProtocol(walletName, 'fynd', FyndSwidgeProtocol, { chainId, ...fynd })
 
 try {
@@ -116,6 +119,7 @@ try {
   process.exitCode = 1
 } finally {
   wdk.dispose()
+  provider.destroy()
 }
 ```
 
@@ -164,7 +168,7 @@ Execution skips sufficient allowance, otherwise approves the exact input, resett
 
 Persist returned transaction hashes. `FyndExecutionError` exposes `stage`, `transactions`, `submissionUnknown` and `cause`. If submission is unknown, reconcile wallet history before resubmitting.
 
-Run one execution per account at a time. WDK takes each nonce from the pending transaction count, so the module refuses a second `swidge` from the same account until the first returns. Other code sending from that account meanwhile can still reuse a nonce.
+Run one execution per account at a time. WDK takes each nonce from the pending transaction count, so the module refuses a second `swidge` from the same chain and address until the first returns. Other code sending from that account meanwhile can still reuse a nonce.
 
 | WDK receipt | Swidge status |
 | --- | --- |

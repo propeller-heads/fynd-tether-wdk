@@ -225,6 +225,14 @@ describe('published WDK account against local fixture contracts', () => {
     })
   }, 15000)
 
+  it('runs back-to-back executions with sequential nonces on an uncached provider', async () => {
+    const first = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    const second = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    const nonces = await Promise.all([first, second].map(async ({ hash }) => (await provider.getTransaction(hash)).nonce))
+    expect(nonces[1]).toBe(nonces[0] + 1)
+    for (const { hash } of [first, second]) await wait(hash)
+  }, 15000)
+
   it('delivers native output to a custom recipient', async () => {
     const before = await provider.getBalance(recipient)
     const result = await protocol.swidge(options({ toToken: ZeroAddress }))

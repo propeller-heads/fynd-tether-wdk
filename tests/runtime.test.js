@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { CHAINS } from '../src/router.js'
 
 const run = promisify(execFile)
 const packageRoot = fileURLToPath(new URL('../', import.meta.url))
@@ -29,6 +30,9 @@ const server = createServer((request, response) => {
     response.write('{"tokens":')
     const timer = setTimeout(() => response.end('[],"total":0,"block":1}'), 2000)
     response.on('close', () => clearTimeout(timer))
+  } else if (request.url.endsWith('/info')) {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ chain_id: 1, router_address: CHAINS.ethereum.router }))
   } else {
     response.writeHead(200, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify(tokenPage))
@@ -59,11 +63,13 @@ describe('public package with real HTTP', () => {
     expect(stderr).toBe('')
     expect(JSON.parse(stdout.trim())).toEqual({ runtime, exports: true, tokens: true, timeout: true, redirect: true, redaction: true })
     const requests = records.slice(firstRecord)
+    // Discovery checks /info first; the failure cases stop there.
     expect(requests.map(record => record.path)).toEqual([
+      '/v1/ethereum/info',
       '/v1/ethereum/tokens?limit=1000&offset=0',
-      '/timeout/v1/ethereum/tokens?limit=1000&offset=0',
-      '/redirect/v1/ethereum/tokens?limit=1000&offset=0',
-      '/unauthorized/v1/ethereum/tokens?limit=1000&offset=0'
+      '/timeout/v1/ethereum/info',
+      '/redirect/v1/ethereum/info',
+      '/unauthorized/v1/ethereum/info'
     ])
     expect(requests.every(record => record.authorization === apiKey)).toBe(true)
     expect(requests.some(record => record.path === '/sink')).toBe(false)

@@ -46,8 +46,8 @@ const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
 // Chains without an L1 data fee, where WDK's gas estimate covers the whole network cost.
 const COMPLETE_FEE_ESTIMATE_CHAINS = new Set([1, 56, 137])
 // WDK takes each nonce from the pending transaction count, so overlapping executions from one
-// account could sign the same nonce. One execution per account runs at a time.
-const EXECUTING_ACCOUNTS = new WeakSet()
+// sender could sign the same nonce. One execution per chain and sender runs at a time.
+const EXECUTING_SENDERS = new Set()
 
 /** @param {WalletAccount} account @returns {account is EvmAccount} */
 function hasEvmAllowance (account) {
@@ -128,14 +128,15 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       maxNetworkFeeBps: cap(config.maxNetworkFeeBps === undefined ? this.#settings.maxNetworkFeeBps : config.maxNetworkFeeBps, 'maxNetworkFeeBps'),
       maxProtocolFeeBps: cap(config.maxProtocolFeeBps === undefined ? this.#settings.maxProtocolFeeBps : config.maxProtocolFeeBps, 'maxProtocolFeeBps')
     }
-    if (EXECUTING_ACCOUNTS.has(account)) {
+    const sender = `${this.#chain.id}:${address(await account.getAddress(), 'account address')}`
+    if (EXECUTING_SENDERS.has(sender)) {
       throw new SwidgeError('Another Fynd swap from this account is still executing; wait for it to return.', { reason: 'EXECUTION_IN_PROGRESS' })
     }
-    EXECUTING_ACCOUNTS.add(account)
+    EXECUTING_SENDERS.add(sender)
     try {
       return await this.#execute(/** @type {WritableAccount} */ (account), options, limits)
     } finally {
-      EXECUTING_ACCOUNTS.delete(account)
+      EXECUTING_SENDERS.delete(sender)
     }
   }
 
@@ -220,6 +221,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     if (options.fromToken !== undefined) {
       throw new NotImplementedError('Fynd pair-scoped token discovery')
     }
+    await this.#checkRouter()
     const tokens = await this.#api.tokens()
     return [
       { token: NATIVE, address: NATIVE, chain: this.#chain.id, symbol: this.#chain.nativeSymbol, decimals: 18 },
