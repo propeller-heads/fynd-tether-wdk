@@ -617,6 +617,38 @@ describe('minimum output and signed deadline', () => {
   })
 })
 
+describe('one execution per account', () => {
+  it('refuses overlapping executions from the same account until the first returns', async () => {
+    const { api, account, state } = harness({ allowance: 0n })
+    let confirm
+    account.waitForTransaction.mockImplementationOnce(id => new Promise(resolve => {
+      confirm = () => {
+        state.allowance = AMOUNT
+        resolve({ hash: id, finality: 'confirmed', success: true, fee: 10n })
+      }
+    }))
+    const first = api.swidge(options)
+    await vi.waitFor(() => expect(confirm).toBeDefined())
+    const sameAccount = new FyndSwidgeProtocol(account, { chainId: 1 })
+    for (const protocol of [api, sameAccount]) {
+      await expect(protocol.swidge(options)).rejects.toMatchObject({ name: 'SwidgeError', reason: 'EXECUTION_IN_PROGRESS' })
+    }
+    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n })
+    expect(account.approve).toHaveBeenCalledTimes(1)
+    confirm()
+    await expect(first).resolves.toMatchObject({ hash: SWAP_HASH })
+    await expect(sameAccount.swidge(options)).resolves.toMatchObject({ hash: SWAP_HASH })
+    expect(account.sendTransaction).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a new execution after one fails', async () => {
+    const { api, account } = harness()
+    account.sendTransaction.mockRejectedValueOnce(new Error('RPC unavailable'))
+    await expect(api.swidge(options)).rejects.toMatchObject({ name: 'FyndExecutionError' })
+    await expect(api.swidge(options)).resolves.toMatchObject({ hash: SWAP_HASH })
+  })
+})
+
 describe('self-hosted Fynd', () => {
   it('quotes and executes against a self-hosted instance at /v1 without an API key', async () => {
     const { api, fetchMock } = harness({ config: { selfHostedUrl: 'http://localhost:3000' } })

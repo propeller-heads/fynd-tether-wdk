@@ -18,7 +18,7 @@ ESM JavaScript, JSDoc-generated declarations, Node.js 22+, and a conditional Bar
 
 Strict TypeScript `WDK.registerWallet(..., WalletManagerEvm, ...)` still fails on conflicting private `_seed` declarations, even without Fynd. JavaScript registration works. The type fixtures record this upstream error and check Fynd's constructor, `registerProtocol` and public interfaces.
 
-WDK has no public `quoteApprove`. `approve` accepts token, spender and amount, without gas overrides. The account provider sets the transaction chain ID. Configure WDK and Fynd for the same chain; module configuration does not verify the provider's network.
+WDK has no public `quoteApprove`. The module passes no gas overrides to `approve` or `sendTransaction`; the account's provider sets gas and the transaction chain ID. Configure WDK and Fynd for the same chain; module configuration does not verify the provider's network.
 
 ## Errors and legacy helpers
 

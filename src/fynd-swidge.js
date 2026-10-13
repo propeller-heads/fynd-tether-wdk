@@ -15,6 +15,7 @@ import { FyndExecutionError } from './errors.js'
  *   Partial<Pick<import('@tetherto/wdk-wallet-evm').WalletAccountEvm, 'getDelegation' | 'approve' | 'sendTransaction' | 'signTypedData'>>
  * } EvmAccount
  */
+/** @typedef {EvmAccount & Required<Pick<import('@tetherto/wdk-wallet-evm').WalletAccountEvm, 'approve' | 'sendTransaction'>>} WritableAccount */
 /** @typedef {import('@tetherto/wdk-wallet/protocols').SwidgeOptions} SwidgeOptions */
 /** @typedef {import('@tetherto/wdk-wallet/protocols').SwidgeProtocolConfig} FeeCaps */
 /** @typedef {import('@tetherto/wdk-wallet/protocols').SwidgeTransaction} SwidgeTransaction */
@@ -44,6 +45,9 @@ const ERC20 = new Interface(['function approve(address spender,uint256 amount) r
 const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
 // Chains without an L1 data fee, where WDK's gas estimate covers the whole network cost.
 const COMPLETE_FEE_ESTIMATE_CHAINS = new Set([1, 56, 137])
+// WDK takes each nonce from the pending transaction count, so overlapping executions from one
+// account could sign the same nonce. One execution per account runs at a time.
+const EXECUTING_ACCOUNTS = new WeakSet()
 
 /** @param {WalletAccount} account @returns {account is EvmAccount} */
 function hasEvmAllowance (account) {
@@ -124,6 +128,22 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       maxNetworkFeeBps: cap(config.maxNetworkFeeBps === undefined ? this.#settings.maxNetworkFeeBps : config.maxNetworkFeeBps, 'maxNetworkFeeBps'),
       maxProtocolFeeBps: cap(config.maxProtocolFeeBps === undefined ? this.#settings.maxProtocolFeeBps : config.maxProtocolFeeBps, 'maxProtocolFeeBps')
     }
+    if (EXECUTING_ACCOUNTS.has(account)) {
+      throw new SwidgeError('Another Fynd swap from this account is still executing; wait for it to return.', { reason: 'EXECUTION_IN_PROGRESS' })
+    }
+    EXECUTING_ACCOUNTS.add(account)
+    try {
+      return await this.#execute(/** @type {WritableAccount} */ (account), options, limits)
+    } finally {
+      EXECUTING_ACCOUNTS.delete(account)
+    }
+  }
+
+  /**
+   * @param {WritableAccount} account @param {SwidgeOptions} options
+   * @param {{maxNetworkFeeBps?: bigint, maxProtocolFeeBps?: bigint}} limits
+   */
+  async #execute (account, options, limits) {
     let prepared = await this.#prepare(options, true)
     await this.#enforceLimits(prepared, limits)
     /** @type {SwidgeTransaction[]} */

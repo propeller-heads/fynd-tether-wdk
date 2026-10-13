@@ -164,6 +164,8 @@ Execution skips sufficient allowance, otherwise approves the exact input, resett
 
 Persist returned transaction hashes. `FyndExecutionError` exposes `stage`, `transactions`, `submissionUnknown` and `cause`. If submission is unknown, reconcile wallet history before resubmitting.
 
+Run one execution per account at a time. WDK takes each nonce from the pending transaction count, so the module refuses a second `swidge` from the same account until the first returns. Other code sending from that account meanwhile can still reuse a nonce.
+
 | WDK receipt | Swidge status |
 | --- | --- |
 | Pending or dropped | `pending` |
@@ -182,7 +184,7 @@ Replacement tracking belongs to the wallet. A supplied hash is not checked to be
 | `AccountRequiredError`, `ReadOnlyAccountRequiredError` | The call needs a writable or read-only account. |
 | `MaximumFeeExceededError` | A quoted fee exceeds its cap. |
 | `ProviderError` | Fynd HTTP, timeout or response-format failures. |
-| `SwidgeError` | `reason` is `INVALID_TRANSACTION`, `UNSUPPORTED_ROUTER`, `SLIPPAGE_TOO_HIGH`, `COULD_NOT_MET_THRESHOLD`, `FEE_ESTIMATE_UNAVAILABLE`, `APPROVAL_FAILED`, `ALLOWANCE_INSUFFICIENT` or `FYND_<STATUS>` for a failed Fynd quote. |
+| `SwidgeError` | `reason` is `INVALID_TRANSACTION`, `UNSUPPORTED_ROUTER`, `SLIPPAGE_TOO_HIGH`, `COULD_NOT_MET_THRESHOLD`, `FEE_ESTIMATE_UNAVAILABLE`, `APPROVAL_FAILED`, `ALLOWANCE_INSUFFICIENT`, `EXECUTION_IN_PROGRESS` or `FYND_<STATUS>` for a failed Fynd quote. |
 | `NotImplementedError` | Pair-scoped token discovery. |
 | `FyndExecutionError` | Execution stopped after it started; see above. |
 
