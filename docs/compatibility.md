@@ -47,7 +47,7 @@ The hosted gateway serves each chain at `/v1/{slug}` and needs an API key. A sel
 ## Unresolved
 
 - License: none granted yet.
-- npm scope and package name (to confirm with Tether), publisher and a private security contact.
+- npm scope and package name (to confirm with Tether) and publisher.
 - Tether's Generic Implementation Requirements document has not been reviewed.
 - Tether confirmation for exact-input scope, account binding, fee estimates and caps, legacy fees, original-hash status and token discovery semantics.
 

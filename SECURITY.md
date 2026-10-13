@@ -2,7 +2,7 @@
 
 ## Reporting
 
-A private disclosure contact is not yet confirmed. Use an existing private PropellerHeads contact to arrange a report. Keep vulnerabilities, seeds, keys, RPC credentials and exploit payloads out of public issues and the [support group](https://t.me/+B4CNQwv7dgIyYTJl), which handles non-sensitive API support.
+Report vulnerabilities privately to security@propellerheads.xyz. Keep vulnerabilities, seeds, keys, RPC credentials and exploit payloads out of public issues and the [support group](https://t.me/+B4CNQwv7dgIyYTJl), which handles non-sensitive API support.
 
 Include package/WDK versions, chain, public transaction hashes and a minimal reproduction with secrets removed.
 
