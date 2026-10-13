@@ -20,7 +20,8 @@ import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
  *
  * @typedef {ValuationQuote & {
  *   routerFee: bigint, clientFee: bigint, minimum: bigint,
- *   transaction: {to: string, data: string, value: bigint}
+ *   transaction: {to: string, data: string, value: bigint},
+ *   signatureOffset: number | undefined
  * }} EncodedQuote
  *
  * @typedef {object} FyndToken
@@ -34,6 +35,7 @@ const QUOTE_FAILURES = new Set([
   'price_check_failed', 'encoding_failed'
 ])
 const MAX_UINT256 = (1n << 256n) - 1n
+const HOSTED_URL = 'https://fynd-api.propellerheads.xyz'
 
 /** @param {string} field */
 function malformed (field) {
@@ -68,22 +70,28 @@ function address (value, field) {
   return value.toLowerCase()
 }
 
-/** Hosted Fynd API client. WDK signs and submits transactions. */
+/** Fynd API client for the hosted gateway or a self-hosted Fynd. WDK signs and submits transactions. */
 export class FyndApi {
   #baseUrl
   #apiKey
   #timeoutMs
 
   /**
-   * @param {{baseUrl?: string, apiKey?: string, chain: string, timeoutMs?: number}} config
+   * The hosted gateway (or a proxy in front of it) serves each chain at `/v1/{chain}`;
+   * a self-hosted Fynd serves its one chain at `/v1` without authentication.
+   * @param {{baseUrl?: string, selfHostedUrl?: string, apiKey?: string, chain: string, timeoutMs?: number}} config
    */
-  constructor ({ baseUrl = 'https://fynd-api.propellerheads.xyz', apiKey, chain, timeoutMs = 10000 }) {
+  constructor ({ baseUrl, selfHostedUrl, apiKey, chain, timeoutMs = 10000 }) {
+    if (selfHostedUrl !== undefined && (baseUrl !== undefined || apiKey !== undefined)) {
+      throw new ValueError('selfHostedUrl cannot be combined with baseUrl or apiKey.')
+    }
+    const name = selfHostedUrl === undefined ? 'baseUrl' : 'selfHostedUrl'
     let url
-    try { url = new URL(baseUrl) } catch { throw new ValueError('baseUrl must be a valid HTTPS URL.') }
+    try { url = new URL(selfHostedUrl ?? baseUrl ?? HOSTED_URL) } catch { throw new ValueError(`${name} must be a valid HTTPS URL.`) }
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
     if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) ||
         url.username || url.password || url.search || url.hash) {
-      throw new ValueError('baseUrl must use HTTPS without credentials, query or fragment (HTTP is allowed on localhost).')
+      throw new ValueError(`${name} must use HTTPS without credentials, query or fragment (HTTP is allowed on localhost).`)
     }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647) {
       throw new ValueError('timeoutMs must be a positive 32-bit integer.')
@@ -91,7 +99,7 @@ export class FyndApi {
     if (apiKey !== undefined && (typeof apiKey !== 'string' || !/^[!-~]+$/.test(apiKey))) {
       throw new ValueError('apiKey must be a nonempty printable ASCII token without whitespace.')
     }
-    this.#baseUrl = `${url.href.replace(/\/$/, '')}/v1/${chain}`
+    this.#baseUrl = `${url.href.replace(/\/$/, '')}/v1${selfHostedUrl === undefined ? `/${chain}` : ''}`
     this.#apiKey = apiKey
     this.#timeoutMs = timeoutMs
   }
@@ -114,21 +122,31 @@ export class FyndApi {
   /**
    * @overload
    * @param {FyndOrder} order
-   * @param {{slippage: string, encode?: true}} options
+   * @param {{slippage: string, clientFee?: import('./router.js').ClientFee, encode?: true}} options
    * @returns {Promise<EncodedQuote>}
    */
   /**
+   * With `clientFee`, Fynd encodes zero-fee client parameters for that receiver and deadline,
+   * leaving a signature placeholder at the returned `signatureOffset`.
    * @param {FyndOrder} order
-   * @param {{slippage?: string, encode?: boolean}} options
+   * @param {{slippage?: string, clientFee?: import('./router.js').ClientFee, encode?: boolean}} options
    * @returns {Promise<EncodedQuote | ValuationQuote>}
    */
-  async quote (order, { slippage, encode = true }) {
+  async quote (order, { slippage, clientFee, encode = true }) {
+    /** @type {Record<string, unknown>} */
+    const encoding = { slippage, transfer_type: 'transfer_from' }
+    if (clientFee) {
+      encoding.client_fee_params = {
+        bps: 0, receiver: clientFee.receiver, max_contribution: '0',
+        deadline: Number(clientFee.deadline), signature: '0x'
+      }
+    }
     const request = {
       orders: [{
         token_in: order.tokenIn, token_out: order.tokenOut, amount: order.amountIn.toString(),
         side: 'sell', sender: order.sender, receiver: order.receiver
       }],
-      options: encode ? { encoding_options: { slippage, transfer_type: 'transfer_from' } } : {}
+      options: encode ? { encoding_options: encoding } : {}
     }
     const response = object(await this.#request('/quote', request), 'quote response')
     if (!Array.isArray(response.orders) || response.orders.length !== 1) throw malformed('quote order count')
@@ -154,20 +172,23 @@ export class FyndApi {
     if (!encode) return result
     const fees = object(quote.fee_breakdown, 'fee breakdown')
     const routerFee = uint(fees.router_fee, 'router fee')
-    const clientFee = uint(fees.client_fee, 'client fee')
+    const clientFeeAmount = uint(fees.client_fee, 'client fee')
     const minimum = uint(fees.min_amount_received, 'minimum received')
     const maxSlippage = uint(fees.max_slippage, 'maximum slippage')
-    if (routerFee + clientFee + minimum + maxSlippage !== grossOutput) throw malformed('fee arithmetic')
+    if (routerFee + clientFeeAmount + minimum + maxSlippage !== grossOutput) throw malformed('fee arithmetic')
     const transaction = object(quote.transaction, 'encoded transaction')
     if (typeof transaction.data !== 'string' || !/^0x(?:[0-9a-fA-F]{2}){4,}$/.test(transaction.data)) {
       throw malformed('transaction calldata')
     }
     return {
-      ...result, routerFee, clientFee, minimum,
+      ...result, routerFee, clientFee: clientFeeAmount, minimum,
       transaction: {
         to: address(transaction.to, 'transaction destination'), data: transaction.data,
         value: uint(transaction.value, 'transaction value')
-      }
+      },
+      signatureOffset: transaction.client_fee_signature_offset == null
+        ? undefined
+        : integer(transaction.client_fee_signature_offset, 'client-fee signature offset')
     }
   }
 

@@ -70,15 +70,21 @@ async function handleApi (request, response) {
   const slippageUnits = BigInt(Math.floor(Number(query.options.encoding_options.slippage) * 1_000_000))
   const encodedMinimum = grossOutput - grossOutput * slippageUnits / 1_000_000n
   const minimum = nextMinimum(quoteCalls.length, encodedMinimum)
-  const data = routerAbi.encodeFunctionData('singleSwap', [
+  // Like Fynd: requested client-fee params get a zeroed signature placeholder and its offset.
+  const fee = query.options.encoding_options.client_fee_params
+  const marker = 'cd'.repeat(65)
+  const calldata = routerAbi.encodeFunctionData('singleSwap', [
     order.amount, tokenIn, tokenOut, grossOutput, minimum, order.receiver,
-    [0, ZeroAddress, 0, MaxUint256, '0x'], AbiCoder.defaultAbiCoder().encode(['uint256'], [grossOutput])
+    fee ? [fee.bps, fee.receiver, fee.max_contribution, fee.deadline, `0x${marker}`] : [0, ZeroAddress, 0, MaxUint256, '0x'],
+    AbiCoder.defaultAbiCoder().encode(['uint256'], [grossOutput])
   ])
+  const transaction = { to: router, data: calldata.replace(marker, '00'.repeat(65)), value: tokenIn === native ? order.amount : '0' }
+  if (fee) transaction.client_fee_signature_offset = (calldata.indexOf(marker) - 2) / 2
   response.end(JSON.stringify({ orders: [{
     status: 'success', amount_in: order.amount, amount_out: grossOutput.toString(),
     gas_estimate: '180000', gas_price: '1000000000',
     fee_breakdown: { router_fee: '0', client_fee: '0', min_amount_received: minimum.toString(), max_slippage: (grossOutput - minimum).toString() },
-    transaction: { to: router, data, value: tokenIn === native ? order.amount : '0' }
+    transaction
   }] }))
 }
 
@@ -169,7 +175,7 @@ afterAll(async () => {
 })
 
 function options (overrides = {}) {
-  return { fromToken: inputToken, toToken: outputToken, fromTokenAmount: inputAmount, recipient, ...overrides }
+  return { fromToken: inputToken, toToken: outputToken, fromTokenAmount: inputAmount, recipient, minAmountOut: 1n, ...overrides }
 }
 
 async function wait (hash) {
@@ -179,6 +185,8 @@ async function wait (hash) {
 }
 
 describe('published WDK account against local fixture contracts', () => {
+  // The fixture router verifies the client-fee signature and deadline like Tycho's router,
+  // so every completed swap below proves the WDK account's EIP-712 signature.
   it('registers, signs approval and swap, refreshes after approval, and reads completion', async () => {
     expect(protocol).toBeInstanceOf(FyndSwidgeProtocol)
     const quoted = await protocol.quoteSwidge(options())
@@ -279,6 +287,23 @@ describe('published WDK account against local fixture contracts', () => {
     await wait(result.hash)
     expect(await provider.getTransactionCount(sender)).toBe(nonce + 1)
     expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+  }, 15000)
+
+  it('lets the router reject a signed swap mined after its deadline', async () => {
+    account.registerProtocol('fynd-short', FyndSwidgeProtocol, { chainId, baseUrl, deadlineSeconds: 1 })
+    const shortLived = account.getSwidgeProtocol('fynd-short')
+    const before = await provider.getBalance(recipient)
+    await provider.send('anvil_setAutomine', [false])
+    // Native input needs no approval, so nothing waits on the paused chain.
+    const result = await shortLived.swidge(options({ fromToken: ZeroAddress }))
+    const submitted = await provider.getTransaction(result.hash)
+    const deadline = routerAbi.decodeFunctionData('singleSwap', submitted.data)[6][3]
+    await provider.send('evm_setNextBlockTimestamp', [Number(deadline) + 1])
+    await provider.send('anvil_mine', [1])
+    expect((await account.getTransaction(result.hash)).success).toBe(false)
+    expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('failed')
+    expect(await provider.getBalance(recipient)).toBe(before)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(0n)
   }, 15000)
 
   it('reports pending and then failed when a broadcast transaction reverts on inclusion', async () => {

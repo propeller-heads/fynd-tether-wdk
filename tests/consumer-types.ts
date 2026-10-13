@@ -3,7 +3,8 @@ import WDK from '@tetherto/wdk'
 import Wallet, { WalletAccountEvm, WalletAccountReadOnlyEvm } from '@tetherto/wdk-wallet-evm'
 import Fynd, { FyndSwidgeProtocol, type FyndConfig, type ISwidgeProtocol } from '../index.js'
 
-const config: FyndConfig = { chainId: 1, quoteSender: '0x1111111111111111111111111111111111111111' }
+const config: FyndConfig = { chainId: 1, quoteSender: '0x1111111111111111111111111111111111111111', deadlineSeconds: 300 }
+const selfHosted: FyndConfig = { chainId: 8453, selfHostedUrl: 'http://localhost:3000' }
 for (const chainId of [1, 8453, 42161, 56, 137, 130, 4663] as const) new Fynd(undefined, { ...config, chainId })
 // @ts-expect-error The hosted API does not support this chain.
 new Fynd(undefined, { chainId: 2 })
@@ -17,11 +18,12 @@ const withFull: ISwidgeProtocol = new Fynd(full, config)
 const wdk = new WDK(seed)
 wdk.registerProtocol('ethereum', 'fynd', Fynd, config)
 
-// EVM beta.19/core beta.18 have incompatible private WalletManager._seed types.
+// EVM beta.21/core beta.19 have incompatible private WalletManager._seed types.
 // Remove this assertion after the upstream fix. Runtime registration has separate tests.
 // @ts-expect-error Upstream EVM wallet registration has incompatible private _seed types.
 wdk.registerWallet('ethereum', Wallet, { chainId: 1 })
 void protocol
+void selfHosted
 void named
 void withReadOnly
 void withFull

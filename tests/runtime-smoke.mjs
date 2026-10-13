@@ -1,6 +1,6 @@
 // Copyright 2026 PropellerHeads AG
 
-import FyndSwidgeProtocol, * as exports from 'wdk-protocol-swidge-fynd'
+import FyndSwidgeProtocol, * as exports from '@propellerheads/wdk-protocol-swidge-fynd'
 
 function check (condition, message) {
   if (!condition) throw new Error(message)

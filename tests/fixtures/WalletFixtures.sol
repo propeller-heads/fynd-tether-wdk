@@ -29,8 +29,18 @@ contract FixtureToken {
 
 /// Test-only settlement harness with the supported outer ABI, not Tycho's router.
 /// Its route bytes contain one uint256 output amount; it does not execute DEX routes.
+/// Client-fee checks mirror TychoRouterV3._verifyClientSignature for EOA receivers.
 contract FixtureRouter {
     address constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    bytes32 constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 constant CLIENT_FEE_TYPEHASH = keccak256(
+        "ClientFee(uint32 clientFeeBps,address clientFeeReceiver,"
+        "uint256 maxClientContribution,uint256 deadline,"
+        "uint256 amountIn,address tokenIn,address tokenOut,"
+        "uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)"
+    );
+
     struct ClientFeeParams {
         uint32 clientFeeBps;
         address clientFeeReceiver;
@@ -42,8 +52,9 @@ contract FixtureRouter {
     function singleSwap(
         uint256 amountIn, address tokenIn, address tokenOut,
         uint256 expectedAmountOut, uint256 minAmountOut, address receiver,
-        ClientFeeParams calldata, bytes calldata route
+        ClientFeeParams calldata fee, bytes calldata route
     ) external payable returns (uint256 amountOut) {
+        verifyClientFee(fee, amountIn, tokenIn, tokenOut, expectedAmountOut, minAmountOut, receiver, route);
         amountOut = abi.decode(route, (uint256));
         require(amountIn > 0 && expectedAmountOut > 0 && minAmountOut > 0, "zero amount");
         require(amountOut >= minAmountOut, "minimum output");
@@ -56,5 +67,30 @@ contract FixtureRouter {
             (bool sent,) = receiver.call{value: amountOut}("");
             require(sent, "native output");
         } else FixtureToken(tokenOut).mint(receiver, amountOut);
+    }
+
+    function verifyClientFee(
+        ClientFeeParams calldata fee, uint256 amountIn, address tokenIn, address tokenOut,
+        uint256 expectedAmountOut, uint256 minAmountOut, address receiver, bytes calldata route
+    ) private view {
+        if (fee.clientFeeReceiver == address(0)) {
+            require(fee.clientFeeBps == 0 && fee.maxClientContribution == 0, "zero receiver fee");
+            return;
+        }
+        require(block.timestamp <= fee.deadline, "expired client signature");
+        bytes32 domain = keccak256(abi.encode(
+            DOMAIN_TYPEHASH, keccak256("TychoRouter"), keccak256("1"), block.chainid, address(this)
+        ));
+        bytes32 structHash = keccak256(abi.encode(
+            CLIENT_FEE_TYPEHASH, fee.clientFeeBps, fee.clientFeeReceiver, fee.maxClientContribution,
+            fee.deadline, amountIn, tokenIn, tokenOut, expectedAmountOut, minAmountOut, receiver,
+            keccak256(route)
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domain, structHash));
+        require(fee.clientSignature.length == 65, "signature length");
+        bytes32 r = bytes32(fee.clientSignature[0:32]);
+        bytes32 s = bytes32(fee.clientSignature[32:64]);
+        uint8 v = uint8(fee.clientSignature[64]);
+        require(ecrecover(digest, v, r, s) == fee.clientFeeReceiver, "invalid client signature");
     }
 }

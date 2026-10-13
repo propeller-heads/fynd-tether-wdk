@@ -58,8 +58,20 @@ describe('hosted Fynd wire boundary', () => {
     expect(quote).toEqual({
       amountIn, grossOutput: 10000n, routerFee: 10n, clientFee: 0n, minimum: 9941n,
       gas: 150000n, gasPrice: 1000000000n, priceImpact: 0.0005,
-      transaction: { to: ROUTER, data: '0x1234567890', value: 0n }
+      transaction: { to: ROUTER, data: '0x1234567890', value: 0n }, signatureOffset: undefined
     })
+  })
+
+  it('requests zero-fee client parameters for signing and returns the placeholder offset', async () => {
+    fetchMock.mockResolvedValue(Response.json({ orders: [encodedOrder({
+      transaction: { to: ROUTER, value: '0', data: '0x1234567890', client_fee_signature_offset: 452 }
+    })] }))
+    const quote = await api.quote(order, { ...encoding, clientFee: { receiver: SENDER, deadline: 1900000000n } })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).options.encoding_options).toEqual({
+      slippage: '0.005', transfer_type: 'transfer_from',
+      client_fee_params: { bps: 0, receiver: SENDER, max_contribution: '0', deadline: 1900000000, signature: '0x' }
+    })
+    expect(quote.signatureOffset).toBe(452)
   })
 
   it('allows a valuation quote without encoding, fees or gas price', async () => {
@@ -110,7 +122,9 @@ describe('hosted Fynd wire boundary', () => {
     ['unsafe transaction value', { transaction: { to: ROUTER, value: 1, data: '0x12345678' } }],
     ['bad price impact', { price_impact_bps: 0.5 }],
     ['inconsistent fees', { fee_breakdown: { router_fee: '10', client_fee: '0', min_amount_received: '10000', max_slippage: '50' } }],
-    ['unknown status', { status: 'success-but-different' }]
+    ['unknown status', { status: 'success-but-different' }],
+    ['negative signature offset', { transaction: { to: ROUTER, value: '0', data: '0x12345678', client_fee_signature_offset: -1 } }],
+    ['string signature offset', { transaction: { to: ROUTER, value: '0', data: '0x12345678', client_fee_signature_offset: '4' } }]
   ])('rejects %s before returning an executable quote', async (_name, overrides) => {
     fetchMock.mockResolvedValue(Response.json({ orders: [encodedOrder(overrides)] }))
     await expect(api.quote(order, encoding)).rejects.toBeInstanceOf(ProviderError)
@@ -152,7 +166,10 @@ describe('HTTP failures and configuration', () => {
     { baseUrl: 'http://api.example.com' }, { baseUrl: 'https://user:password@example.com' },
     { baseUrl: 'https://example.com?key=secret' }, { baseUrl: 'https://example.com#fragment' },
     { baseUrl: 'file:///tmp/example' }, { baseUrl: 'invalid' },
-    { timeoutMs: 0 }, { timeoutMs: Infinity }, { apiKey: 'key\r\nX-Evil: value' }
+    { timeoutMs: 0 }, { timeoutMs: Infinity }, { apiKey: 'key\r\nX-Evil: value' },
+    { selfHostedUrl: 'http://fynd.internal:3000' }, { selfHostedUrl: 'invalid' },
+    { selfHostedUrl: 'http://localhost:3000', apiKey: 'key' },
+    { selfHostedUrl: 'http://localhost:3000', baseUrl: 'https://example.com' }
   ])('rejects unsafe configuration %j', config => {
     expect(() => new FyndApi({ chain: 'ethereum', ...config })).toThrow(ValueError)
   })
@@ -162,6 +179,14 @@ describe('HTTP failures and configuration', () => {
     const proxy = new FyndApi({ baseUrl: 'http://localhost:3000/fynd/', chain: 'base' })
     await expect(proxy.info()).resolves.toEqual({ chainId: 8453, routerAddress: ROUTER })
     expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:3000/fynd/v1/base/info')
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
+  })
+
+  it('serves a self-hosted Fynd at /v1 without authentication', async () => {
+    fetchMock.mockResolvedValue(Response.json({ chain_id: 8453, router_address: ROUTER, version: '0.111.1' }))
+    const local = new FyndApi({ selfHostedUrl: 'http://127.0.0.1:3000/', chain: 'base' })
+    await expect(local.info()).resolves.toEqual({ chainId: 8453, routerAddress: ROUTER })
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:3000/v1/info')
     expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty('Authorization')
   })
 
