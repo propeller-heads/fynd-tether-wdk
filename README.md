@@ -1,6 +1,11 @@
 # Fynd Swidge for WDK
 
-[![Powered by WDK](https://img.shields.io/badge/Powered_by-WDK-26A17B)](https://docs.wdk.tether.io/)
+<a href="https://docs.wdk.tether.io/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/built-with-wdk-dark.svg">
+    <img alt="Built with WDK" src="assets/built-with-wdk-light.svg" width="140" height="32">
+  </picture>
+</a>
 
 A [WDK](https://docs.wdk.tether.io/) Swidge module for same-chain, exact-input swaps routed by [Fynd](https://github.com/propeller-heads/fynd), the PropellerHeads DEX aggregator. Use the hosted Fynd API or point the module at your own Fynd server. Fynd supplies routes and calldata; WDK handles approvals, signing, broadcast and transaction lookup.
 
