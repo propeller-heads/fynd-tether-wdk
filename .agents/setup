@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb: Anvil for the integration tests and pnpm dependencies.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+step() {
+  local label=$1 start=$SECONDS
+  shift
+  echo "==> $label"
+  "$@"
+  echo "<== $label ($((SECONDS - start))s)"
+}
+
+# Matches the foundry-toolchain version in .github/workflows/ci.yml.
+foundry_version=v1.7.1
+
+install_anvil() {
+  local bin_dir="$HOME/.local/bin" install_dir="$HOME/.local/share/foundry/$foundry_version"
+  if "$bin_dir/anvil" --version 2>/dev/null | grep -Fq "${foundry_version#v}"; then
+    echo "anvil $foundry_version already installed"
+    return
+  fi
+
+  local arch sha256
+  case "$(uname -m)" in
+    x86_64) arch=amd64 sha256=cf7e688ed0c4c48adffca788b496076e31060b67ac5afe1e43dbb5499c20c88b ;;
+    aarch64) arch=arm64 sha256=c8fe8fa09ae3aba2c81b510c6f9da3a9d468029b9580e690b245b3f0aea687ae ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; return 1 ;;
+  esac
+
+  local tmp
+  tmp=$(mktemp -d)
+  curl -fsSL --retry 3 -o "$tmp/foundry.tar.gz" \
+    "https://github.com/foundry-rs/foundry/releases/download/$foundry_version/foundry_${foundry_version}_linux_$arch.tar.gz"
+  echo "$sha256  $tmp/foundry.tar.gz" | sha256sum -c --quiet -
+  mkdir -p "$install_dir" "$bin_dir"
+  tar -xzf "$tmp/foundry.tar.gz" -C "$install_dir" anvil
+  rm -rf "$tmp"
+  ln -sfn "$install_dir/anvil" "$bin_dir/anvil"
+  "$bin_dir/anvil" --version
+}
+
+ensure_pnpm() {
+  # pnpm switches itself to the packageManager version in package.json.
+  if ! command -v pnpm >/dev/null; then
+    corepack enable --install-directory "$HOME/.local/bin" pnpm
+  fi
+  node --version
+  pnpm --version
+}
+
+step "Install Anvil $foundry_version" install_anvil
+step "Check Node.js and pnpm" ensure_pnpm
+step "Install dependencies" pnpm install --frozen-lockfile
