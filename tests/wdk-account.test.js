@@ -1,0 +1,327 @@
+// Copyright 2026 PropellerHeads AG
+
+import { createHash } from 'node:crypto'
+import { once } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { spawn, spawnSync } from 'node:child_process'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { AbiCoder, Contract, Interface, JsonRpcProvider, MaxUint256, ZeroAddress, toBeHex } from 'ethers'
+import WDK from '@tetherto/wdk'
+import WalletManagerEvm from '@tetherto/wdk-wallet-evm'
+import FyndSwidgeProtocol from '../index.js'
+import { CHAINS } from '../src/router.js'
+
+const fixtures = JSON.parse(readFileSync(new URL('./fixtures/wallet-fixtures.json', import.meta.url)))
+const fixtureSource = readFileSync(new URL('./fixtures/WalletFixtures.sol', import.meta.url))
+const routerAbi = new Interface(fixtures.contracts.FixtureRouter.abi)
+const tokenAbi = new Interface(fixtures.contracts.FixtureToken.abi)
+const inputToken = '0x000000000000000000000000000000000000a100'
+const outputToken = '0x000000000000000000000000000000000000a200'
+const usdt = '0xdac17f958d2ee523a2206206994597c13d831ec7'
+const recipient = '0x000000000000000000000000000000000000b100'
+const native = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+// Anvil's public, disposable development mnemonic. Never use for real funds.
+const mnemonic = 'test test test test test test test test test test test junk'
+const inputAmount = 10n ** 16n
+const grossOutput = 1_000_000n
+
+let anvil, provider, rpcUrl, mockApi, baseUrl, snapshot, wdk, account, protocol, sender
+let quoteCalls, nextMinimum
+let chainName = 'ethereum'
+let chainId = 1
+let router = CHAINS.ethereum.router
+
+async function listen (server) {
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  return server.address().port
+}
+
+async function handleApi (request, response) {
+  response.setHeader('Content-Type', 'application/json')
+  if (request.url === `/v1/${chainName}/info`) {
+    response.end(JSON.stringify({ chain_id: chainId, router_address: router, version: 'test-fixture' }))
+    return
+  }
+  if (request.url !== `/v1/${chainName}/quote`) {
+    response.writeHead(404).end('{}')
+    return
+  }
+  let body = ''
+  for await (const chunk of request) body += chunk
+  const query = JSON.parse(body)
+  const order = query.orders[0]
+  const tokenIn = order.token_in === ZeroAddress ? native : order.token_in
+  const tokenOut = order.token_out === ZeroAddress ? native : order.token_out
+  const allowance = tokenIn === native ? 0n : await new Contract(tokenIn, tokenAbi, provider).allowance(sender, router)
+  const encoded = query.options.encoding_options !== undefined
+  quoteCalls.push({ order, allowance, encoded })
+  if (!encoded) {
+    // A full-trade input-to-native valuation quote, without transaction encoding.
+    if (order.token_out !== ZeroAddress) throw new Error('Unexpected valuation token')
+    response.end(JSON.stringify({ orders: [{
+      status: 'success', amount_in: order.amount, amount_out: '1000000000000000000',
+      gas_estimate: '180000', gas_price: '1000000000'
+    }] }))
+    return
+  }
+  // Compute Fynd's slippage independently to catch drift in the production guard.
+  const slippageUnits = BigInt(Math.floor(Number(query.options.encoding_options.slippage) * 1_000_000))
+  const encodedMinimum = grossOutput - grossOutput * slippageUnits / 1_000_000n
+  const minimum = nextMinimum(quoteCalls.length, encodedMinimum)
+  // Like Fynd: requested client-fee params get a zeroed signature placeholder and its offset.
+  const fee = query.options.encoding_options.client_fee_params
+  const marker = 'cd'.repeat(65)
+  const calldata = routerAbi.encodeFunctionData('singleSwap', [
+    order.amount, tokenIn, tokenOut, grossOutput, minimum, order.receiver,
+    fee ? [fee.bps, fee.receiver, fee.max_contribution, fee.deadline, `0x${marker}`] : [0, ZeroAddress, 0, MaxUint256, '0x'],
+    AbiCoder.defaultAbiCoder().encode(['uint256'], [grossOutput])
+  ])
+  const transaction = { to: router, data: calldata.replace(marker, '00'.repeat(65)), value: tokenIn === native ? order.amount : '0' }
+  if (fee) transaction.client_fee_signature_offset = (calldata.indexOf(marker) - 2) / 2
+  response.end(JSON.stringify({ orders: [{
+    status: 'success', amount_in: order.amount, amount_out: grossOutput.toString(),
+    gas_estimate: '180000', gas_price: '1000000000',
+    fee_breakdown: { router_fee: '0', client_fee: '0', min_amount_received: minimum.toString(), max_slippage: (grossOutput - minimum).toString() },
+    transaction
+  }] }))
+}
+
+async function selectChain (name, id) {
+  wdk?.dispose()
+  await provider.send('anvil_setChainId', [id])
+  provider.destroy()
+  provider = new JsonRpcProvider(rpcUrl, id, { staticNetwork: true, cacheTimeout: -1 })
+  chainName = name
+  chainId = id
+  router = CHAINS[name].router
+  await provider.send('anvil_setCode', [router, fixtures.contracts.FixtureRouter.runtime])
+  await provider.send('anvil_setBalance', [router, toBeHex(10n ** 20n)])
+  wdk = new WDK(mnemonic)
+    .registerWallet(name, WalletManagerEvm, { provider, chainId: id })
+    .registerProtocol(name, 'fynd', FyndSwidgeProtocol, { chainId: id, baseUrl, approvalTimeoutMs: 10000 })
+  account = await wdk.getAccount(name, 0)
+  sender = await account.getAddress()
+  protocol = account.getSwidgeProtocol('fynd')
+}
+
+beforeAll(async () => {
+  expect(createHash('sha256').update(fixtureSource).digest('hex')).toBe(fixtures.sourceSha256)
+  const binary = process.env.ANVIL_BIN ?? 'anvil'
+  if (spawnSync(binary, ['--version']).status !== 0) throw new Error('Install Anvil or set ANVIL_BIN to run the WDK account integration tests.')
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await new Promise(resolve => reservation.close(resolve))
+  rpcUrl = `http://127.0.0.1:${port}`
+  anvil = spawn(binary, ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '1', '--hardfork', 'cancun', '--accounts', '3'], { stdio: 'ignore' })
+  let startError
+  anvil.once('error', error => { startError = error })
+  let ready = false
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (startError) throw startError
+    if (anvil.exitCode !== null) throw new Error('Anvil exited before its local RPC became ready.')
+    try {
+      const response = await fetch(rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) })
+      if ((await response.json()).result === '0x1') { ready = true; break }
+    } catch { /* The owned local process is still starting. */ }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  if (!ready) throw new Error('Anvil local RPC did not become ready.')
+  provider = new JsonRpcProvider(rpcUrl, 1, { staticNetwork: true, cacheTimeout: -1 })
+  for (const token of [inputToken, outputToken, usdt]) {
+    await provider.send('anvil_setCode', [token, fixtures.contracts.FixtureToken.runtime])
+  }
+  await provider.send('anvil_setCode', [router, fixtures.contracts.FixtureRouter.runtime])
+  await provider.send('anvil_setBalance', [router, toBeHex(10n ** 20n)])
+  snapshot = await provider.send('evm_snapshot', [])
+  mockApi = createServer((request, response) => {
+    handleApi(request, response).catch(() => response.writeHead(500).end('{}'))
+  })
+  baseUrl = `http://127.0.0.1:${await listen(mockApi)}`
+}, 15000)
+
+beforeEach(async () => {
+  quoteCalls = []
+  nextMinimum = (_count, minimum) => minimum
+  await selectChain('ethereum', 1)
+  const setupSigner = await provider.getSigner(1)
+  for (const token of [inputToken, usdt]) {
+    await (await new Contract(token, tokenAbi, setupSigner).mint(sender, inputAmount * 10n)).wait()
+  }
+})
+
+afterEach(async () => {
+  wdk?.dispose()
+  wdk = undefined
+  if (provider && snapshot) {
+    await provider.send('anvil_setAutomine', [true])
+    await provider.send('evm_revert', [snapshot])
+    snapshot = await provider.send('evm_snapshot', [])
+  }
+})
+
+afterAll(async () => {
+  provider?.destroy()
+  if (mockApi) {
+    mockApi.closeAllConnections()
+    await new Promise(resolve => mockApi.close(resolve))
+  }
+  if (anvil && anvil.exitCode === null) {
+    const exited = once(anvil, 'exit')
+    anvil.kill('SIGTERM')
+    await exited
+  }
+})
+
+function options (overrides = {}) {
+  return { fromToken: inputToken, toToken: outputToken, fromTokenAmount: inputAmount, recipient, minAmountOut: 1n, ...overrides }
+}
+
+async function wait (hash) {
+  const result = await account.waitForTransaction(hash, { target: 'confirmed', timeout: 10000, pollingInterval: 25 })
+  expect(result.success).toBe(true)
+  return result
+}
+
+describe('published WDK account against local fixture contracts', () => {
+  // The fixture router verifies the client-fee signature and deadline like Tycho's router,
+  // so every completed swap below proves the WDK account's EIP-712 signature.
+  it('registers, signs approval and swap, refreshes after approval, and reads completion', async () => {
+    expect(protocol).toBeInstanceOf(FyndSwidgeProtocol)
+    const quoted = await protocol.quoteSwidge(options())
+    expect(quoted.toTokenAmountMin).toBe(995_000n)
+    expect(quoted.networkFeeComplete).toBe(false) // Swap cannot estimate before allowance.
+    const result = await protocol.swidge(options())
+    expect(result.transactions.map(tx => tx.type)).toEqual(['approval', 'source'])
+    const approval = await account.getTransaction(result.transactions[0].hash)
+    expect(approval.success).toBe(true)
+    expect(quoteCalls.map(call => call.allowance)).toEqual([0n, 0n, inputAmount])
+    await wait(result.hash)
+    expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('completed')
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+    expect(await account.getAllowance(inputToken, router)).toBe(0n)
+    const submitted = await provider.getTransaction(result.hash)
+    expect(submitted.from.toLowerCase()).toBe(sender.toLowerCase())
+    expect(submitted.to.toLowerCase()).toBe(router)
+    expect(submitted.chainId).toBe(1n)
+    expect(result.networkFeeComplete).toBe(true)
+  }, 15000)
+
+  it.each(Object.entries(CHAINS))('registers, signs, submits and reads a native-input swap on %s', async (name, { id }) => {
+    await selectChain(name, id)
+    expect(protocol).toBeInstanceOf(FyndSwidgeProtocol)
+    const result = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    expect(result.transactions).toEqual([{ hash: result.hash, chain: id, type: 'source' }])
+    await wait(result.hash)
+    const submitted = await provider.getTransaction(result.hash)
+    expect(submitted.chainId).toBe(BigInt(id))
+    expect(submitted.value).toBe(inputAmount)
+    expect(submitted.from.toLowerCase()).toBe(sender.toLowerCase())
+    expect(submitted.to.toLowerCase()).toBe(router)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+    expect(await protocol.getSwidgeStatus(result.hash)).toEqual({
+      status: 'completed', transactions: [{ hash: result.hash, chain: id, type: 'source' }]
+    })
+  }, 15000)
+
+  it('runs back-to-back executions with sequential nonces on an uncached provider', async () => {
+    const first = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    const second = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    const nonces = await Promise.all([first, second].map(async ({ hash }) => (await provider.getTransaction(hash)).nonce))
+    expect(nonces[1]).toBe(nonces[0] + 1)
+    for (const { hash } of [first, second]) await wait(hash)
+  }, 15000)
+
+  it('delivers native output to a custom recipient', async () => {
+    const before = await provider.getBalance(recipient)
+    const result = await protocol.swidge(options({ toToken: ZeroAddress }))
+    await wait(result.hash)
+    expect(await provider.getBalance(recipient)).toBe(before + grossOutput)
+  }, 15000)
+
+  it('preserves the confirmed approval when the fresh quote weakens the slippage floor', async () => {
+    nextMinimum = (count, minimum) => count === 1 ? minimum : minimum - 10_000n
+    const nonce = await provider.getTransactionCount(sender)
+    let failure
+    try { await protocol.swidge(options({ minAmountOut: 995_000n })) } catch (error) { failure = error }
+    expect(failure).toBeDefined()
+    expect(failure.transactions.map(tx => tx.type)).toEqual(['approval'])
+    expect(failure.submissionUnknown).toBe(false)
+    expect((await account.getTransaction(failure.transactions[0].hash)).success).toBe(true)
+    expect(await provider.getTransactionCount(sender)).toBe(nonce + 1)
+    expect(await account.getAllowance(inputToken, router)).toBe(inputAmount)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(0n)
+  }, 15000)
+
+  it('confirms both USDT-style reset and exact approval before swapping', async () => {
+    const contract = new Contract(usdt, tokenAbi, await provider.getSigner(1))
+    await (await contract.setRequireReset(true)).wait()
+    await wait((await account.approve({ token: usdt, spender: router, amount: 1n })).hash)
+    const result = await protocol.swidge(options({ fromToken: usdt }))
+    expect(result.transactions.map(tx => tx.type)).toEqual(['approval', 'approval', 'source'])
+    const approvalValues = []
+    for (const tx of result.transactions.slice(0, 2)) {
+      const submitted = await provider.getTransaction(tx.hash)
+      approvalValues.push(tokenAbi.decodeFunctionData('approve', submitted.data)[1])
+      expect((await account.getTransaction(tx.hash)).success).toBe(true)
+    }
+    expect(approvalValues).toEqual([0n, inputAmount])
+    expect(quoteCalls.map(call => call.allowance)).toEqual([1n, inputAmount])
+    await wait(result.hash)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+  }, 15000)
+
+  it('rejects a network-capped unapproved ERC20 swap before any approval', async () => {
+    const nonce = await provider.getTransactionCount(sender)
+    await expect(protocol.swidge(options(), { maxNetworkFeeBps: 100 })).rejects.toMatchObject({
+      reason: 'FEE_ESTIMATE_UNAVAILABLE'
+    })
+    expect(await provider.getTransactionCount(sender)).toBe(nonce)
+    expect(await account.getAllowance(inputToken, router)).toBe(0n)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(0n)
+    expect(quoteCalls).toHaveLength(1)
+    expect(quoteCalls[0].encoded).toBe(true)
+  }, 15000)
+
+  it('executes a network-capped preapproved ERC20 swap after valuing the full input trade', async () => {
+    await wait((await account.approve({ token: inputToken, spender: router, amount: inputAmount })).hash)
+    const nonce = await provider.getTransactionCount(sender)
+    const result = await protocol.swidge(options(), { maxNetworkFeeBps: 100 })
+    expect(result.networkFeeComplete).toBe(true)
+    expect(result.transactions.map(tx => tx.type)).toEqual(['source'])
+    expect(quoteCalls.map(call => call.encoded)).toEqual([true, false])
+    expect(quoteCalls[1].order).toMatchObject({ token_in: inputToken, token_out: ZeroAddress, amount: inputAmount.toString() })
+    await wait(result.hash)
+    expect(await provider.getTransactionCount(sender)).toBe(nonce + 1)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+  }, 15000)
+
+  it('lets the router reject a signed swap mined after its deadline', async () => {
+    account.registerProtocol('fynd-short', FyndSwidgeProtocol, { chainId, baseUrl, deadlineSeconds: 1 })
+    const shortLived = account.getSwidgeProtocol('fynd-short')
+    const before = await provider.getBalance(recipient)
+    await provider.send('anvil_setAutomine', [false])
+    // Native input needs no approval, so nothing waits on the paused chain.
+    const result = await shortLived.swidge(options({ fromToken: ZeroAddress }))
+    const submitted = await provider.getTransaction(result.hash)
+    const deadline = routerAbi.decodeFunctionData('singleSwap', submitted.data)[6][3]
+    await provider.send('evm_setNextBlockTimestamp', [Number(deadline) + 1])
+    await provider.send('anvil_mine', [1])
+    expect((await account.getTransaction(result.hash)).success).toBe(false)
+    expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('failed')
+    expect(await provider.getBalance(recipient)).toBe(before)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(0n)
+  }, 15000)
+
+  it('reports pending and then failed when a broadcast transaction reverts on inclusion', async () => {
+    await provider.send('anvil_setAutomine', [false])
+    const result = await protocol.swidge(options({ fromToken: ZeroAddress }))
+    expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('pending')
+    // Force an EVM revert after broadcast to test receipt handling.
+    await provider.send('anvil_setCode', [router, '0x5f5ffd'])
+    await provider.send('anvil_mine', [1])
+    expect((await account.getTransaction(result.hash)).success).toBe(false)
+    expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('failed')
+  }, 15000)
+})
