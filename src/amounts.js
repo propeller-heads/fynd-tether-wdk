@@ -30,11 +30,11 @@ export function amount (value, name, allowZero = false) {
 
 /** @param {unknown} value @param {string} name */
 export function address (value, name) {
+  if (typeof value !== 'string') throw new ValueError(`${name} must be an EVM address.`)
   try {
-    if (typeof value !== 'string') throw new Error()
     return getAddress(value).toLowerCase()
-  } catch {
-    throw new ValueError(`${name} must be an EVM address.`)
+  } catch (error) {
+    throw new ValueError(`${name} must be an EVM address.`, { cause: error })
   }
 }
 
@@ -43,8 +43,8 @@ export function token (value) {
   try {
     const result = address(value, 'token')
     return result === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' ? NATIVE : result
-  } catch {
-    throw new InvalidTokenError('Use an EVM token address or the native zero address.', {})
+  } catch (error) {
+    throw new InvalidTokenError('Use an EVM token address or the native zero address.', { cause: error })
   }
 }
 

@@ -6,6 +6,18 @@ function check (condition, message) {
   if (!condition) throw new Error(message)
 }
 
+// Messages, stacks and own fields of an error and every cause, to search for leaked secrets.
+function chainText (error) {
+  const parts = []
+  for (let current = error; current; current = current.cause) {
+    parts.push(String(current), String(current.stack))
+    for (const key of Object.getOwnPropertyNames(current)) {
+      try { parts.push(key, JSON.stringify(current[key])) } catch { parts.push(String(current[key])) }
+    }
+  }
+  return parts.join('\n')
+}
+
 const baseUrl = process.env.FYND_SMOKE_URL
 const apiKey = 'wdk-local-runtime-secret'
 check(typeof baseUrl === 'string' && baseUrl.startsWith('http://127.0.0.1:'), 'Smoke URL must be a local server.')
@@ -31,12 +43,13 @@ const redirect = new FyndSwidgeProtocol(undefined, { chainId: 1, baseUrl: `${bas
 let redirectError
 try { await redirect.getSupportedTokens() } catch (error) { redirectError = error }
 check(redirectError?.reason === 'NETWORK_ERROR', 'Redirect was not rejected.')
-check(!String(redirectError).includes(apiKey) && redirectError.cause === undefined, 'Redirect error leaked request credentials.')
+check(redirectError.cause !== undefined, 'Redirect error dropped its fetch cause.')
+check(!chainText(redirectError).includes(apiKey), 'Redirect error leaked request credentials.')
 
 const unauthorized = new FyndSwidgeProtocol(undefined, { chainId: 1, baseUrl: `${baseUrl}/unauthorized`, apiKey })
 let authError
 try { await unauthorized.getSupportedTokens() } catch (error) { authError = error }
 check(authError?.reason === 'UNAUTHORIZED', 'Text HTTP error did not retain its safe reason.')
-check(!String(authError).includes(apiKey) && authError.cause === undefined, 'HTTP error leaked echoed credentials.')
+check(!chainText(authError).includes(apiKey) && authError.cause === undefined, 'HTTP error leaked echoed credentials.')
 
 console.log(JSON.stringify({ runtime: typeof Bare === 'undefined' ? 'node' : 'bare', exports: true, tokens: true, timeout: true, redirect: true, redaction: true }))

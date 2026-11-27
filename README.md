@@ -9,21 +9,25 @@
 
 A [WDK](https://docs.wdk.tether.io/) Swidge module for same-chain, exact-input swaps routed by [Fynd](https://github.com/propeller-heads/fynd), the PropellerHeads DEX aggregator. Use the hosted Fynd API or point the module at your own Fynd server. Fynd supplies routes and calldata; WDK handles approvals, signing, broadcast and transaction lookup.
 
-It implements `ISwidgeProtocol` from `@tetherto/wdk-wallet` `^1.0.0-beta.23`, tested with `@tetherto/wdk` `1.0.0-beta.19` and `@tetherto/wdk-wallet-evm` `1.0.0-beta.21`.
+It implements `ISwidgeProtocol` from `@tetherto/wdk-wallet` `^1.0.0-beta.23`. Your app supplies `@tetherto/wdk` and `@tetherto/wdk-wallet-evm` (an optional peer dependency); tests use `1.0.0-beta.19` and `1.0.0-beta.21`.
 
 ## Supported chains
 
-Matches the [hosted API's chain list](https://github.com/propeller-heads/fynd/blob/main/docs/get-started/hosted-api.md#supported-chains) as of October 13, 2026. New chains require a module release.
+Covers every chain hosted Fynd serves as of November 27, 2026: the eight in the [hosted API's chain list](https://github.com/propeller-heads/fynd/blob/main/docs/get-started/hosted-api.md#supported-chains), plus Arc, which the gateway serves but the list does not name yet. Tycho also has a router on Plasma, but hosted Fynd does not serve Plasma, so the module does not support it. New chains require a module release.
 
-| Chain | ID | API slug | Native token |
-| --- | ---: | --- | --- |
-| Ethereum | 1 | `ethereum` | ETH |
-| Base | 8453 | `base` | ETH |
-| Arbitrum | 42161 | `arbitrum` | ETH |
-| BNB Smart Chain | 56 | `bsc` | BNB |
-| Polygon | 137 | `polygon` | POL |
-| Unichain | 130 | `unichain` | ETH |
-| Robinhood Chain | 4663 | `robinhood` | ETH |
+| Chain | ID | API slug | Native token | Live fork swap |
+| --- | ---: | --- | --- | --- |
+| Ethereum | 1 | `ethereum` | ETH | ETH to USDT, settled |
+| Base | 8453 | `base` | ETH | ETH to USDT, settled |
+| Arbitrum | 42161 | `arbitrum` | ETH | ETH to USD₮0, settled |
+| BNB Smart Chain | 56 | `bsc` | BNB | BNB to USDT, settled |
+| Polygon | 137 | `polygon` | POL | POL to USDT0, settled |
+| Unichain | 130 | `unichain` | ETH | ETH to USD₮0, settled |
+| Robinhood Chain | 4663 | `robinhood` | ETH | ETH to USDG, settled |
+| Arc | 5042 | `arc` | USDC | USDC to EURC, settled in one of two runs |
+| Elysium | 99901 | `elysium` | HYPE | HYPE to USDC, settled |
+
+Every chain passes the local suite: its chain ID, slug and router address, and a signed native-input swap through a fixture router on Anvil. On November 27, 2026, every chain also settled a signed swap from a live hosted Fynd quote (0.129.3) through its deployed router on an Anvil fork, and the router rejected that swap after its deadline. Fork runs depend on the route Fynd picks, because Anvil does not reproduce everything these chains do; on Arc, routes that move ERC-20 USDC revert on a fork. See [live fork runs](docs/compatibility.md#live-fork-runs).
 
 `getSupportedTokens()` lists the tokens Fynd tracks on the configured chain: quality 100, zero transfer tax, plus the native token.
 
@@ -37,9 +41,14 @@ This alpha package is private and unpublished. With Node.js 22+ and pnpm 11:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm build
 cp .env.example .env
 ```
+
+Install `@tetherto/wdk` and `@tetherto/wdk-wallet-evm` in your app alongside it.
+
+- **Node.js:** 22 or newer resolves the `default` export, `index.js`. It uses the global `fetch`, `AbortController` and `URL`.
+- **Bare:** 1.35 or newer resolves the `bare` export, `bare.js`. That file installs `bare-node-runtime` globals and loads the module with `bare-node-runtime/imports`. The floor comes from `bare-module`, which a fresh install resolves with `engines.bare >=1.35.0`. If your Bare app imports `ethers` or WDK itself, load your code with the same import map: `import 'bare-node-runtime/global'` and then `import './app.js' with { imports: 'bare-node-runtime/imports' }`. List `bare-node-runtime` in your app's own dependencies to import it; pnpm does not expose a package's dependencies to your app. Tests run register, `getSwidgeProtocol` and `swidge` with `bare` 1.38.0 from the packed package.
+- **Bundlers:** bundle for Bare with the `bare` condition and for Node with `default`, and keep `bare-node-runtime` and its `imports` map in a Bare bundle. Bundled builds are untested; the tests load the package unbundled.
 
 ## Configure
 
@@ -144,7 +153,7 @@ Keep `.env` local. Production wallets should use their existing custody flow for
 | `swidge(options, config?)` | Approves if needed, requotes after approval, signs the swap deadline, broadcasts one swap and returns `id`, `hash`, `transactions` and quoted amounts and fees. |
 | `getSwidgeStatus(id, options?)` | Looks up the original hash through a full or read-only account. |
 | `getSupportedChains()` | The supported chains above. |
-| `getSupportedTokens(options?)` | Tokens on the configured chain, from one consistent block. `fromToken` filtering is unsupported. |
+| `getSupportedTokens(options?)` | Tokens on the configured chain, from one consistent block. Fynd routes between any listed tokens, so with `fromToken` the list omits that token. |
 
 Swap options require `fromToken`, `toToken` and `fromTokenAmount`. `swidge` also requires `minAmountOut`, a positive floor in output-token base units that you set independently of Fynd. Optional: `recipient` (the sender by default), `slippage` (default `0.005`, or 0.5%) and a matching `toChain`. Chain hints accept the numeric ID, decimal string or API slug.
 
@@ -165,39 +174,50 @@ Token discovery uses Fynd's experimental `/tokens` endpoint. A changed block or 
 
 Same-chain swaps have no bridge fee, and the legacy `bridge`/`quoteBridge` helpers are unsupported. WDK's legacy `swap` helpers add both fees into one number in different tokens, so use Swidge's itemized fees. Positive slippage can increase the settled router fee.
 
-`networkFeeComplete` is true only with an account, no pending approval and a successful WDK estimate on Ethereum, BNB Smart Chain or Polygon. On Base, Arbitrum, Unichain and Robinhood Chain the estimate misses the L1 data fee. Without a WDK estimate, Fynd's gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
+`networkFeeComplete` is true only with an account, no pending approval and a successful WDK estimate on Ethereum, BNB Smart Chain, Polygon or Arc. Base, Arbitrum, Unichain, Robinhood Chain and Elysium also charge for parent-chain data, so their estimates never count as complete. Without a WDK estimate, Fynd's gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
 
 Caps apply only to execution. The protocol cap compares the router fee with gross output. The network cap needs a complete estimate as above; it compares cost with the native input or an input-to-native valuation quote, and otherwise rejects before any write. Per-call caps override constructor values; `undefined` inherits, and zero remains active.
 
 Execution skips sufficient allowance, otherwise approves the exact input, resetting nonzero insufficient Ethereum USDT allowance first. It confirms approvals before requoting. **A later quote, cap, minimum or slippage failure can leave approvals active and gas spent.** Confirmed approval fees are added to the result's network fee.
 
-Persist returned transaction hashes. `FyndExecutionError` exposes `stage`, `transactions`, `submissionUnknown` and `cause`. If submission is unknown, reconcile wallet history before resubmitting.
+Persist returned transaction hashes. `FyndExecutionError` exposes `stage`, `transactions`, `submissionUnknown`, `cause` and `reason`: the cause's Swidge reason (such as `APPROVAL_FAILED`, or `INSUFFICIENT_BALANCE` when the wallet lacks funds), or `undefined`. `stage` is one of `approval`, `allowance reset`, `approval confirmation`, `quote refresh` or `swap submission`. If submission is unknown, reconcile wallet history before resubmitting. When WDK rejects the first transaction before broadcasting it (`ProviderRequiredError`, `ValueError` or `MaximumFeeExceededError`), `swidge` rethrows WDK's error unchanged, because nothing was sent. When the wallet's simulation rejects a transaction (a revert or insufficient funds), `swidge` throws `FyndExecutionError` with `submissionUnknown: false`.
 
 Run one execution per account at a time. WDK takes each nonce from the pending transaction count, so the module refuses a second `swidge` from the same chain and address until the first returns. Other code sending from that account meanwhile can still reuse a nonce.
 
 | WDK receipt | Swidge status |
 | --- | --- |
-| Pending or dropped | `pending` |
+| Pending, dropped or unrecognized | `pending` |
 | Confirmed or final, succeeded | `completed` |
 | Confirmed or final, reverted (including after the deadline) | `failed` |
 | Not found | throws `NoSuchElementError` |
+| Invalid hash | throws `ValueError` |
 
 Replacement tracking belongs to the wallet. A supplied hash is not checked to be a Fynd swap, and `completed` does not mean irreversible finality.
 
 ### Errors
 
-| Error | When |
-| --- | --- |
-| `ValueError` | Invalid configuration or options, missing `minAmountOut` for execution, delegated account. |
-| `InvalidTokenError` | A token is not an EVM address or the native address. |
-| `AccountRequiredError`, `ReadOnlyAccountRequiredError` | The call needs a writable or read-only account. |
-| `MaximumFeeExceededError` | A quoted fee exceeds its cap. |
-| `ProviderError` | Fynd HTTP, timeout or response-format failures. |
-| `SwidgeError` | `reason` is `INVALID_TRANSACTION`, `UNSUPPORTED_ROUTER`, `SLIPPAGE_TOO_HIGH`, `COULD_NOT_MET_THRESHOLD`, `FEE_ESTIMATE_UNAVAILABLE`, `APPROVAL_FAILED`, `ALLOWANCE_INSUFFICIENT`, `EXECUTION_IN_PROGRESS` or `FYND_<STATUS>` for a failed Fynd quote. |
-| `NotImplementedError` | Pair-scoped token discovery. |
-| `FyndExecutionError` | Execution stopped after it started; see above. |
+| Error | When | What to do |
+| --- | --- | --- |
+| `ValueError` | Invalid configuration or options, missing `minAmountOut` for execution, delegated account, or WDK rejected the transaction before sending it. | Fix the input. Use an ordinary EVM account for execution. |
+| `InvalidTokenError` | A token is not an EVM address or the native address, or `fromToken` is not an ERC-20 token on this chain. | Use a token from `getSupportedTokens()`. |
+| `AccountRequiredError` | `swidge` without a full EVM account that can sign typed data. | Register the protocol on a full WDK EVM account. |
+| `ProviderRequiredError` | Status lookup without an account, or the account has no provider. | Connect the WDK wallet to an RPC provider. |
+| `MaximumFeeExceededError` | A quoted fee exceeds its cap, or the transaction exceeds the account's `transactionMaxFee`. Nothing was sent. | Raise the cap, or retry later or with a different amount. |
+| `ProviderError` | Fynd or the RPC is unreachable or slow (`NETWORK_ERROR`, `REQUEST_TIMEOUT`); Fynd refused the API key (`UNAUTHORIZED`, `FORBIDDEN`); or `INTERNAL_SERVER_ERROR`: an RPC server or JSON-RPC error such as a rate limit, a Fynd server error, an invalid Fynd response, calldata or router metadata, or a token list that changed during pagination. | Retry `NETWORK_ERROR` and `REQUEST_TIMEOUT` with backoff, and retry `INTERNAL_SERVER_ERROR` once. Check the Fynd API key for `UNAUTHORIZED` or `FORBIDDEN`. If `INTERNAL_SERVER_ERROR` persists, check the RPC, then report it to Fynd support. |
+| `SwidgeError` | `reason` is one of the values below. | See each reason. |
+| `FyndExecutionError` | Execution stopped after it began sending: a transaction was or may have been sent, or the wallet's simulation rejected one; see above. | Persist `transactions`. If `submissionUnknown`, reconcile wallet history before resubmitting. |
 
-Wallet and RPC failures can propagate their own errors. Messages and causes are not stable contracts. See [compatibility](docs/compatibility.md) for WDK and router details.
+| `SwidgeError` reason | When | What to do |
+| --- | --- | --- |
+| `SLIPPAGE_TOO_HIGH` | Fynd's executable minimum misses the requested slippage. | Requote, or allow more slippage. |
+| `COULD_NOT_MET_THRESHOLD` | Fynd's executable minimum is below `minAmountOut`. | Requote, or lower `minAmountOut`. |
+| `NO_ROUTE_FOUND` | Fynd has no route for the pair. | Try another pair or route through a listed token. |
+| `INSUFFICIENT_LIQUIDITY` | Fynd's routes cannot fill the amount. | Try a smaller amount. |
+| `FEE_ESTIMATE_UNAVAILABLE` | A network cap was requested, but the full network cost cannot be estimated. | Approve first, use Ethereum, BNB Smart Chain or Polygon, or omit the network cap. |
+| `APPROVAL_FAILED` | An approval reverted, was dropped, or left the allowance short. Arrives as `FyndExecutionError`. An approval that times out also arrives as `FyndExecutionError` at stage `approval confirmation`, with `reason` undefined. | Check the approval hash in `transactions`, then retry. |
+| `EXECUTION_IN_PROGRESS` | Another `swidge` from this account is still running. | Wait for it to return. |
+
+The last five reasons are not `SwidgeErrorReason` values yet; they are proposed to WDK. Unrecognized wallet errors propagate unchanged. Messages are not stable contracts. See [compatibility](docs/compatibility.md) for WDK and router details.
 
 ## Development
 
@@ -205,10 +225,11 @@ Wallet and RPC failures can propagate their own errors. Messages and causes are 
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm build
 ```
 
-Tests need Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and loopback ports. They run fixture contracts, Node and Bare locally. `tests/live-fork.test.js` also runs against the hosted API and Tycho's deployed Ethereum router on a mainnet fork when `FYND_API_KEY` and `ETHEREUM_RPC_URL` are set.
+Tests need Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and loopback ports. They run fixture contracts, Node and Bare locally. `tests/live-fork.test.js` also runs against the hosted API and Tycho's deployed routers, on an Anvil fork of each chain whose `<CHAIN>_RPC_URL` is set, when `FYND_API_KEY` is set. The Ethereum fork is pinned to `ETHEREUM_FORK_BLOCK_NUMBER`, so `ETHEREUM_RPC_URL` must be an archive RPC; other chains fork their latest block (see `.env.example`).
+
+`types/` is committed and edited by hand. Update the declarations that change with each JSDoc change, and review them in the pull request. `pnpm typecheck` checks them through the package's own export map. `pnpm build:types` regenerates the whole tree only as a starting point.
 
 [Source](https://github.com/propeller-heads/fynd-tether-wdk) · [Fynd support](https://t.me/+B4CNQwv7dgIyYTJl) · [Security reports](SECURITY.md)
 

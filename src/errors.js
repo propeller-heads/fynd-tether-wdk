@@ -12,21 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
+import { isError } from 'ethers'
+import { SwidgeError, SwidgeErrorReason } from '@tetherto/wdk-wallet/protocols'
 
-/** Execution failure with transaction progress for reconciliation. */
+/**
+ * Where execution stopped. `approval`, `allowance reset` and `swap submission` send a
+ * transaction; `approval confirmation` waits for one; `quote refresh` requotes after approvals.
+ * @typedef {'approval' | 'allowance reset' | 'approval confirmation' | 'quote refresh' | 'swap submission'} FyndExecutionStage
+ */
+
+/** @param {unknown} cause @returns {string | undefined} */
+function swidgeReason (cause) {
+  if (cause instanceof SwidgeError) return cause.reason
+  if (isError(cause, 'INSUFFICIENT_FUNDS')) return SwidgeErrorReason.INSUFFICIENT_BALANCE
+  return undefined
+}
+
+/**
+ * Execution failure with transaction progress for reconciliation. `reason` is the cause's
+ * Swidge reason (a `SwidgeErrorReason` value or a reason proposed to WDK, such as
+ * `APPROVAL_FAILED`), `INSUFFICIENT_BALANCE` for an ethers `INSUFFICIENT_FUNDS` cause, or
+ * `undefined`.
+ */
 export class FyndExecutionError extends SwidgeError {
   /**
-   * @param {string} stage
+   * @param {FyndExecutionStage} stage
    * @param {import('@tetherto/wdk-wallet/protocols').SwidgeTransaction[]} transactions
    * @param {boolean} submissionUnknown
    * @param {unknown} cause
    */
   constructor (stage, transactions, submissionUnknown, cause) {
     super(`Fynd execution stopped during ${stage}; inspect transaction progress before retrying.`, {
-      reason: 'EXECUTION_STOPPED', cause
+      reason: /** @type {string} */ (swidgeReason(cause)), cause
     })
     this.name = 'FyndExecutionError'
+    /** @type {FyndExecutionStage} */
     this.stage = stage
     this.transactions = transactions.map(transaction => ({ ...transaction }))
     this.submissionUnknown = submissionUnknown
