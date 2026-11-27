@@ -42,17 +42,23 @@ import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
  * @property {number} decimals
  */
 
-const QUOTE_FAILURES = new Set([
-  'no_route_found', 'insufficient_liquidity', 'timeout', 'not_ready',
-  'price_check_failed', 'encoding_failed'
-])
+// Fynd order failures. no_route_found and insufficient_liquidity have no SwidgeErrorReason yet;
+// these reasons are proposed to WDK (README errors).
+const QUOTE_FAILURES = Object.freeze({
+  timeout: { ErrorType: ProviderError, reason: ProviderErrorReason.REQUEST_TIMEOUT },
+  not_ready: { ErrorType: ProviderError, reason: ProviderErrorReason.REQUEST_TIMEOUT },
+  encoding_failed: { ErrorType: ProviderError, reason: ProviderErrorReason.INTERNAL_SERVER_ERROR },
+  price_check_failed: { ErrorType: ProviderError, reason: ProviderErrorReason.INTERNAL_SERVER_ERROR },
+  no_route_found: { ErrorType: SwidgeError, reason: 'NO_ROUTE_FOUND' },
+  insufficient_liquidity: { ErrorType: SwidgeError, reason: 'INSUFFICIENT_LIQUIDITY' }
+})
 const MAX_UINT256 = (1n << 256n) - 1n
 const HOSTED_URL = 'https://fynd-api.propellerheads.xyz'
 
-/** @param {string} field */
-function malformed (field) {
+/** @param {string} field @param {unknown} [cause] */
+function malformed (field, cause) {
   return new ProviderError(`Fynd returned invalid ${field}.`, {
-    reason: ProviderErrorReason.INTERNAL_SERVER_ERROR
+    reason: ProviderErrorReason.INTERNAL_SERVER_ERROR, cause
   })
 }
 
@@ -163,8 +169,9 @@ export class FyndApi {
     const response = object(await this.#request('/quote', request), 'quote response')
     if (!Array.isArray(response.orders) || response.orders.length !== 1) throw malformed('quote order count')
     const quote = object(response.orders[0], 'quote order')
-    if (typeof quote.status === 'string' && QUOTE_FAILURES.has(quote.status)) {
-      throw new SwidgeError(`Fynd quote failed: ${quote.status}.`, { reason: `FYND_${quote.status.toUpperCase()}` })
+    if (typeof quote.status === 'string' && Object.hasOwn(QUOTE_FAILURES, quote.status)) {
+      const { ErrorType, reason } = QUOTE_FAILURES[/** @type {keyof typeof QUOTE_FAILURES} */ (quote.status)]
+      throw new ErrorType(`Fynd quote failed: ${quote.status}.`, { reason })
     }
     if (quote.status !== 'success') throw malformed('quote status')
     const amountIn = uint(quote.amount_in, 'quote input amount')
@@ -259,8 +266,8 @@ export class FyndApi {
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: 'error', signal: controller.signal
       })
-      // Body reads share the deadline. Omit provider text and fetch causes, which
-      // can expose API keys, proxy credentials or request details.
+      // Body reads share the deadline. Omit HTTP error bodies, which can echo the API key. A
+      // JSON.parse cause quotes at most about 20 characters of a 2xx body, around the parse error.
       const text = await response.text()
       if (Date.now() >= deadline) {
         throw new ProviderError('Fynd request timed out.', { reason: ProviderErrorReason.REQUEST_TIMEOUT })
@@ -272,11 +279,14 @@ export class FyndApi {
               : ProviderErrorReason.INTERNAL_SERVER_ERROR
         throw new ProviderError(`Fynd HTTP request failed (${response.status}).`, { reason })
       }
-      try { return JSON.parse(text) } catch { throw malformed('JSON response') }
+      try { return JSON.parse(text) } catch (error) { throw malformed('JSON response', error) }
     } catch (error) {
       if (error instanceof ProviderError) throw error
+      // Node and Bare fetch causes carry the failure (refused, DNS, TLS, redirect, reset), not request
+      // headers or proxy credentials; baseUrl cannot embed credentials.
       throw new ProviderError(controller.signal.aborted ? 'Fynd request timed out.' : 'Fynd network request failed.', {
-        reason: controller.signal.aborted ? ProviderErrorReason.REQUEST_TIMEOUT : ProviderErrorReason.NETWORK_ERROR
+        reason: controller.signal.aborted ? ProviderErrorReason.REQUEST_TIMEOUT : ProviderErrorReason.NETWORK_ERROR,
+        cause: error
       })
     } finally {
       clearTimeout(timer)

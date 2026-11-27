@@ -97,15 +97,15 @@ describe('hosted Fynd wire boundary', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).options.encoding_options.slippage).toBe('1e-7')
   })
 
-  it.each(['no_route_found', 'insufficient_liquidity', 'timeout', 'not_ready', 'price_check_failed', 'encoding_failed'])(
-    'rejects HTTP-success semantic status %s without retrying', async (status) => {
-      fetchMock.mockResolvedValue(Response.json({ orders: [encodedOrder({ status, transaction: null })] }))
-      await expect(api.quote(order, encoding)).rejects.toMatchObject({
-        name: 'SwidgeError', reason: `FYND_${status.toUpperCase()}`
-      })
-      expect(fetchMock).toHaveBeenCalledTimes(1)
-    }
-  )
+  it.each([
+    ['timeout', 'ProviderError', 'REQUEST_TIMEOUT'], ['not_ready', 'ProviderError', 'REQUEST_TIMEOUT'],
+    ['encoding_failed', 'ProviderError', 'INTERNAL_SERVER_ERROR'], ['price_check_failed', 'ProviderError', 'INTERNAL_SERVER_ERROR'],
+    ['no_route_found', 'SwidgeError', 'NO_ROUTE_FOUND'], ['insufficient_liquidity', 'SwidgeError', 'INSUFFICIENT_LIQUIDITY']
+  ])('maps HTTP-success semantic status %s to %s %s without retrying', async (status, name, reason) => {
+    fetchMock.mockResolvedValue(Response.json({ orders: [encodedOrder({ status, transaction: null })] }))
+    await expect(api.quote(order, encoding)).rejects.toMatchObject({ name, reason, message: `Fynd quote failed: ${status}.` })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 
   it.each([
     ['missing transaction', { transaction: null }],
@@ -127,7 +127,9 @@ describe('hosted Fynd wire boundary', () => {
     ['string signature offset', { transaction: { to: ROUTER, value: '0', data: '0x12345678', client_fee_signature_offset: '4' } }]
   ])('rejects %s before returning an executable quote', async (_name, overrides) => {
     fetchMock.mockResolvedValue(Response.json({ orders: [encodedOrder(overrides)] }))
-    await expect(api.quote(order, encoding)).rejects.toBeInstanceOf(ProviderError)
+    const error = await api.quote(order, encoding).catch(error => error)
+    expect(error).toBeInstanceOf(ProviderError)
+    expect(error).toMatchObject({ reason: 'INTERNAL_SERVER_ERROR', message: expect.stringMatching(/^Fynd returned invalid /) })
   })
 
   it.each([[], [encodedOrder(), encodedOrder()], undefined])('requires exactly one response order', async (orders) => {
@@ -150,16 +152,20 @@ describe('HTTP failures and configuration', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('redacts network exceptions, including redirect errors, without retrying', async () => {
-    fetchMock.mockRejectedValue(new Error(`Request with Authorization: ${KEY} failed`))
-    await expect(api.info()).rejects.toMatchObject({ message: 'Fynd network request failed.', reason: 'NETWORK_ERROR' })
+  it('wraps network exceptions with their cause, without retrying', async () => {
+    const failure = new TypeError('fetch failed', { cause: new Error('unexpected redirect') })
+    fetchMock.mockRejectedValue(failure)
+    await expect(api.info()).rejects.toMatchObject({ message: 'Fynd network request failed.', reason: 'NETWORK_ERROR', cause: failure })
     expect(fetchMock.mock.calls[0][1].redirect).toBe('error')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('rejects a malformed success body without including its text', async () => {
     fetchMock.mockResolvedValue(new Response(`not JSON: ${KEY}`))
-    await expect(api.info()).rejects.toMatchObject({ message: 'Fynd returned invalid JSON response.' })
+    const error = await api.info().catch(error => error)
+    expect(error).toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', message: 'Fynd returned invalid JSON response.' })
+    expect(error.cause).toBeInstanceOf(SyntaxError)
+    expect(String(error.cause)).not.toContain(KEY)
   })
 
   it.each([
@@ -222,7 +228,9 @@ describe('complete token discovery', () => {
   ])('never returns a partial list when %s', async (_name, secondPage) => {
     fetchMock.mockResolvedValueOnce(Response.json({ tokens: [token(1)], total: 2, block: 123 }))
       .mockResolvedValueOnce(Response.json(secondPage))
-    await expect(api.tokens()).rejects.toBeInstanceOf(ProviderError)
+    const error = await api.tokens().catch(error => error)
+    expect(error).toBeInstanceOf(ProviderError)
+    expect(error).toMatchObject({ reason: 'INTERNAL_SERVER_ERROR', message: expect.stringMatching(/token (list changed|pagination|across pages)/) })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

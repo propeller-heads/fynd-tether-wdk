@@ -8,4 +8,6 @@
 - Require `minAmountOut` for execution.
 - Apply network fee caps on Ethereum, BNB Smart Chain and Polygon.
 - Validate router calls and caller limits; preserve transaction progress after failures.
-- Add Node and Bare support, declarations, tests and usage docs.
+- Report failures with WDK error classes and `ProviderErrorReason` or `SwidgeErrorReason` values, keeping the original error as `cause`; five more Swidge reasons are proposed to WDK.
+- Depend only on `@tetherto/wdk-wallet`, `ethers` and `bare-node-runtime`; `@tetherto/wdk-wallet-evm` is an optional peer dependency.
+- Add Node and Bare support, hand-maintained declarations, tests and usage docs.

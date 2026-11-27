@@ -1,5 +1,10 @@
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": { "emitDeclarationOnly": false, "noEmit": true },
+  "compilerOptions": {
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "declaration": false,
+    "outDir": null
+  },
   "include": ["consumer-types.ts"]
 }

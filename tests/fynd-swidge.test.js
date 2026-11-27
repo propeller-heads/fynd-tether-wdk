@@ -2,8 +2,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { inspect } from 'node:util'
-import { Interface, MaxUint256, ZeroAddress } from 'ethers'
-import { ValueError } from '@tetherto/wdk-wallet'
+import { Interface, JsonRpcProvider, MaxUint256, ZeroAddress, makeError } from 'ethers'
+import { WalletAccountReadOnlyEvm } from '@tetherto/wdk-wallet-evm'
+import { MaximumFeeExceededError, ProviderRequiredError, ValueError } from '@tetherto/wdk-wallet'
 import FyndSwidgeProtocol from '../src/fynd-swidge.js'
 import { CHAINS } from '../src/router.js'
 
@@ -25,7 +26,7 @@ const HOSTED_CHAINS = [
   [137, 'polygon', 'Polygon', 'POL'], [130, 'unichain', 'Unichain', 'ETH'],
   [4663, 'robinhood', 'Robinhood Chain', 'ETH']
 ]
-// Independent outer ABI fixture, matching tycho-execution 0.423.0's deployed router.
+// Independent outer ABI fixture, matching TychoRouterV3 as deployed on November 16, 2026 (unchanged since tycho-execution 0.423.0).
 const abi = new Interface([
   'function singleSwap(uint256 amountIn,address tokenIn,address tokenOut,uint256 expectedAmountOut,uint256 minAmountOut,address receiver,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes swaps)'
 ])
@@ -199,12 +200,18 @@ describe('public quote and execution modes', () => {
   })
 
   it.each([
-    { toTokenAmount: 1n }, { toChain: 8453 }, { fromTokenAmount: 0n }, { fromTokenAmount: 9007199254740992 },
-    { fromTokenAmount: 1n << 256n }, { fromToken: 'ETH' }, { toToken: WETH }, { recipient: ZeroAddress },
-    { slippage: 1 }, { slippage: -0.1 }, { slippage: NaN }, { slippage: Infinity }, { slippage: '0.005' }, { refundAddress: SENDER }
-  ])('rejects unsupported or invalid request %o before any network request or write', async patch => {
+    [{ toTokenAmount: 1n }, 'ValueError', /exact-input/], [{ toChain: 8453 }, 'ValueError', /configured chain/],
+    [{ fromTokenAmount: 0n }, 'ValueError', /fromTokenAmount is outside/],
+    [{ fromTokenAmount: 9007199254740992 }, 'ValueError', /fromTokenAmount must be a bigint or safe integer/],
+    [{ fromTokenAmount: 1n << 256n }, 'ValueError', /fromTokenAmount is outside/],
+    [{ fromToken: 'ETH' }, 'InvalidTokenError', /EVM token address/], [{ toToken: WETH }, 'ValueError', /must differ/],
+    [{ recipient: ZeroAddress }, 'ValueError', /nonzero/],
+    [{ slippage: 1 }, 'ValueError', /slippage must be/], [{ slippage: -0.1 }, 'ValueError', /slippage must be/],
+    [{ slippage: NaN }, 'ValueError', /slippage must be/], [{ slippage: Infinity }, 'ValueError', /slippage must be/],
+    [{ slippage: '0.005' }, 'ValueError', /slippage must be/], [{ refundAddress: SENDER }, 'ValueError', /refundAddress/]
+  ])('rejects unsupported or invalid request %o with %s before any network request or write', async (patch, name, message) => {
     const { api, account, fetchMock } = harness()
-    await expect(api.swidge({ ...options, ...patch })).rejects.toThrow()
+    await expect(api.swidge({ ...options, ...patch })).rejects.toMatchObject({ name, message })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(account.approve).not.toHaveBeenCalled()
     expect(account.sendTransaction).not.toHaveBeenCalled()
@@ -257,10 +264,11 @@ describe('public quote and execution modes', () => {
 
   it('rejects Fynd metadata for a different chain or router', async () => {
     const { api, account, state } = harness({ allowance: 0n })
+    const mismatch = { name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', message: /metadata does not match/ }
     state.infoPatch = { chain_id: 8453 }
-    await expect(api.swidge(options)).rejects.toMatchObject({ reason: 'UNSUPPORTED_ROUTER' })
+    await expect(api.swidge(options)).rejects.toMatchObject(mismatch)
     state.infoPatch = { router_address: SENDER }
-    await expect(api.swidge(options)).rejects.toMatchObject({ reason: 'UNSUPPORTED_ROUTER' })
+    await expect(api.swidge(options)).rejects.toMatchObject(mismatch)
     expect(account.approve).not.toHaveBeenCalled()
   })
 })
@@ -301,6 +309,69 @@ describe('allowances, fresh execution and partial progress', () => {
     await expect(api.swidge(options)).rejects.toBe(failure)
     expect(account.approve).not.toHaveBeenCalled()
     expect(account.sendTransaction).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['NETWORK_ERROR', 'ProviderError', { reason: 'NETWORK_ERROR' }], ['SERVER_ERROR', 'ProviderError', { reason: 'INTERNAL_SERVER_ERROR' }],
+    ['TIMEOUT', 'ProviderError', { reason: 'REQUEST_TIMEOUT' }],
+    ['ECONNREFUSED', 'ProviderError', { reason: 'NETWORK_ERROR' }],
+    ['CALL_EXCEPTION', 'InvalidTokenError', {}], ['BAD_DATA', 'InvalidTokenError', {}]
+  ])('maps an ethers %s from the allowance read to %s with its cause', async (code, name, extra) => {
+    const { api, account } = harness()
+    const failure = code === 'ECONNREFUSED'
+      ? Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8545'), { code })
+      : makeError('allowance read failed', code)
+    account.getAllowance.mockRejectedValue(failure)
+    await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name, ...extra, cause: failure })
+    await expect(api.swidge(options)).rejects.toMatchObject({ name, cause: failure })
+    expect(account.approve).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    // A revert, as ethers reports it from a node: revert data, or a revert message without data.
+    ['a revert with data', makeError('execution reverted', 'CALL_EXCEPTION', { data: '0x', info: { error: { code: 3, message: 'execution reverted' } } }), 'InvalidTokenError'],
+    ['a revert message', makeError('missing revert data', 'CALL_EXCEPTION', { data: null, info: { error: { code: -32000, message: 'execution reverted' } } }), 'InvalidTokenError'],
+    // ethers files every eth_call JSON-RPC error as CALL_EXCEPTION, including a rate limit.
+    ['a rate limit', makeError('missing revert data', 'CALL_EXCEPTION', { data: null, info: { error: { code: -32005, message: 'limit exceeded' } } }), 'ProviderError']
+  ])('tells %s on the allowance read apart from other JSON-RPC errors', async (_name, failure, name) => {
+    const { api, account } = harness()
+    account.getAllowance.mockRejectedValue(failure)
+    await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name, cause: failure })
+  })
+
+  it.each([
+    ['approve', 0n, new ValueError('USDT requires the current allowance to be reset')],
+    ['approve', 0n, new ProviderRequiredError('The wallet must be connected to a provider to approve funds.')],
+    ['sendTransaction', AMOUNT, new MaximumFeeExceededError('Exceeded maximum fee cost for transaction operation.')],
+    ['sendTransaction', AMOUNT, makeError('execution reverted', 'CALL_EXCEPTION')]
+  ])('rethrows a WDK %s error raised before anything is broadcast as is', async (method, allowance, failure) => {
+    const { api, account } = harness({ allowance })
+    account[method].mockRejectedValue(failure)
+    const error = await api.swidge(options).catch(error => error)
+    if (failure.code === 'CALL_EXCEPTION') {
+      // A simulation revert is not a WDK error class; it stays wrapped but is known unsent.
+      expect(error).toMatchObject({ name: 'FyndExecutionError', submissionUnknown: false, transactions: [], cause: failure })
+    } else {
+      expect(error).toBe(failure)
+    }
+  })
+
+  it('keeps a pre-broadcast swap rejection after a confirmed approval as known-unsent progress', async () => {
+    const { api, account } = harness({ allowance: 0n })
+    const failure = new MaximumFeeExceededError('Exceeded maximum fee cost for transaction operation.')
+    account.sendTransaction.mockRejectedValue(failure)
+    await expect(api.swidge(options)).rejects.toMatchObject({
+      name: 'FyndExecutionError', stage: 'swap submission', submissionUnknown: false,
+      transactions: [{ hash: hash(1), type: 'approval' }], cause: failure
+    })
+  })
+
+  it('carries an insufficient-funds cause as the WDK reason', async () => {
+    const { api, account } = harness()
+    account.sendTransaction.mockRejectedValue(makeError('insufficient funds', 'INSUFFICIENT_FUNDS'))
+    await expect(api.swidge(options)).rejects.toMatchObject({
+      name: 'FyndExecutionError', reason: 'INSUFFICIENT_BALANCE', submissionUnknown: false
+    })
   })
 
   it.each([
@@ -348,7 +419,7 @@ describe('allowances, fresh execution and partial progress', () => {
     })
     await expect(api.swidge(options)).rejects.toMatchObject({
       stage: 'quote refresh', transactions: [{ hash: hash(1) }], submissionUnknown: false,
-      cause: { reason: 'SLIPPAGE_TOO_HIGH' }
+      reason: 'SLIPPAGE_TOO_HIGH', cause: { reason: 'SLIPPAGE_TOO_HIGH' }
     })
     expect(account.sendTransaction).not.toHaveBeenCalled()
   })
@@ -357,7 +428,7 @@ describe('allowances, fresh execution and partial progress', () => {
     const { api, account } = harness({ allowance: 0n })
     account.sendTransaction.mockRejectedValue(new Error('RPC connection closed after submission'))
     await expect(api.swidge(options)).rejects.toMatchObject({
-      stage: 'swap submission', transactions: [{ hash: hash(1) }], submissionUnknown: true
+      stage: 'swap submission', transactions: [{ hash: hash(1) }], submissionUnknown: true, reason: undefined
     })
     expect(account.sendTransaction).toHaveBeenCalledTimes(1)
   })
@@ -447,7 +518,7 @@ describe('requested fee caps', () => {
 
   it('refuses a requested cap when a preapproved swap cannot be estimated', async () => {
     const { api, account } = harness()
-    account.quoteSendTransaction.mockRejectedValueOnce(new Error('swap gas estimate unavailable'))
+    account.quoteSendTransaction.mockRejectedValueOnce(makeError('execution reverted', 'CALL_EXCEPTION'))
     await expect(api.swidge(options, { maxNetworkFeeBps: 10000 })).rejects.toMatchObject({ reason: 'FEE_ESTIMATE_UNAVAILABLE' })
     expect(account.approve).not.toHaveBeenCalled()
   })
@@ -462,11 +533,21 @@ describe('requested fee caps', () => {
   it('omits an unavailable network fee rather than reporting it as zero', async () => {
     const { api, account, state } = harness()
     state.quotePatch = { gas_price: undefined }
-    account.quoteSendTransaction.mockRejectedValue(new Error('network estimate unavailable'))
+    account.quoteSendTransaction.mockRejectedValue(makeError('execution reverted', 'CALL_EXCEPTION'))
     const result = await api.quoteSwidge(options)
     expect(result.networkFeeComplete).toBe(false)
     expect(result.fees.map(fee => fee.type)).toEqual(['protocol'])
     expect(result.fees[0]).toMatchObject({ token: USDC, amount: 20n })
+  })
+
+  it('reports estimate failures other than a simulation revert instead of falling back', async () => {
+    const { api, account } = harness()
+    const missing = new ProviderRequiredError('The wallet must be connected to a provider to quote send transaction operations.')
+    account.quoteSendTransaction.mockRejectedValueOnce(missing)
+    await expect(api.quoteSwidge(options)).rejects.toBe(missing)
+    const outage = makeError('server error', 'SERVER_ERROR')
+    account.quoteSendTransaction.mockRejectedValueOnce(outage)
+    await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', cause: outage })
   })
 
   it.each([56, 137])('applies network caps on chain %i, which has no L1 data fee', async chainId => {
@@ -487,7 +568,8 @@ describe('requested fee caps', () => {
 
 describe('status, discovery and inherited WDK delegates', () => {
   it.each([
-    [{ finality: 'dropped' }, 'pending'], [{ finality: 'final', success: false }, 'failed']
+    [{ finality: 'dropped' }, 'pending'], [{ finality: 'final', success: false }, 'failed'],
+    [{ finality: 'safe', success: true }, 'pending'], [{ finality: 'confirmed' }, 'pending']
   ])('maps receipt %j without guessing replacements', async (receipt, status) => {
     const { api, account } = harness()
     account.getTransaction.mockResolvedValue(receipt)
@@ -504,18 +586,37 @@ describe('status, discovery and inherited WDK delegates', () => {
     const failure = new Error('provider unavailable')
     account.getTransaction.mockRejectedValueOnce(failure)
     await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toBe(failure)
+    const timeout = makeError('timeout', 'TIMEOUT')
+    account.getTransaction.mockRejectedValueOnce(timeout)
+    await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ProviderError', reason: 'REQUEST_TIMEOUT', cause: timeout })
+    const rpcError = makeError('could not coalesce error', 'UNKNOWN_ERROR', { error: { code: -32005, message: 'limit exceeded' } })
+    account.getTransaction.mockRejectedValueOnce(rpcError)
+    await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', cause: rpcError })
     await expect(api.getSwidgeStatus('0x123')).rejects.toMatchObject({ name: 'ValueError' })
+  })
+
+  it('reports an unreachable RPC through a real WDK account as a network ProviderError', async () => {
+    const provider = new JsonRpcProvider('http://127.0.0.1:1', 1, { staticNetwork: true, cacheTimeout: -1 })
+    try {
+      const account = new WalletAccountReadOnlyEvm(SENDER, { provider })
+      const api = new FyndSwidgeProtocol(account, { chainId: 1 })
+      await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({
+        name: 'ProviderError', reason: 'NETWORK_ERROR', cause: { code: 'ECONNREFUSED' }
+      })
+    } finally {
+      provider.destroy()
+    }
   })
 
   it('requires an account for status lookup', async () => {
     const { api } = harness({ mode: 'none' })
-    await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ReadOnlyAccountRequiredError' })
+    await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ProviderRequiredError', message: /Status lookup requires/ })
   })
 
   it('checks the Fynd chain before listing its tokens', async () => {
     const { api, state, fetchMock } = harness({ chainId: 8453 })
     state.infoPatch = { chain_id: 1 }
-    await expect(api.getSupportedTokens()).rejects.toMatchObject({ reason: 'UNSUPPORTED_ROUTER' })
+    await expect(api.getSupportedTokens()).rejects.toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR' })
     expect(fetchMock.mock.calls.some(([url]) => url.includes('/tokens?'))).toBe(false)
   })
 
@@ -525,7 +626,11 @@ describe('status, discovery and inherited WDK delegates', () => {
     state.tokens.push({ address: USDT, symbol: 'TAX', decimals: 6, quality: 100, tax: 1 })
     const tokens = await api.getSupportedTokens({ fromChain: 'ethereum', toChain: 1 })
     expect(tokens.map(token => token.token)).toEqual([ZeroAddress, WETH])
-    await expect(api.getSupportedTokens({ fromToken: WETH })).rejects.toMatchObject({ name: 'NotImplementedError' })
+    // Fynd routes any listed pair, so the pair-scoped list is every other token.
+    expect((await api.getSupportedTokens({ fromToken: WETH.toUpperCase().replace('0X', '0x') })).map(token => token.token)).toEqual([ZeroAddress])
+    expect((await api.getSupportedTokens({ fromToken: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE' })).map(token => token.token)).toEqual([WETH])
+    // An unlisted or malformed fromToken excludes nothing instead of throwing an undeclared error.
+    expect((await api.getSupportedTokens({ fromToken: 'ETH' })).map(token => token.token)).toEqual([ZeroAddress, WETH])
     await expect(api.getSupportedTokens({ fromChain: 8453 })).rejects.toMatchObject({ name: 'ValueError' })
   })
 
@@ -540,8 +645,8 @@ describe('status, discovery and inherited WDK delegates', () => {
   it('rejects both inherited bridge paths without writing transactions', async () => {
     const { api, account } = harness()
     const bridge = { token: WETH, amount: AMOUNT, targetChain: 8453, recipient: RECEIVER }
-    await expect(api.quoteBridge(bridge)).rejects.toThrow()
-    await expect(api.bridge(bridge)).rejects.toThrow()
+    await expect(api.quoteBridge(bridge)).rejects.toMatchObject({ name: 'ValueError', message: /configured chain/ })
+    await expect(api.bridge(bridge)).rejects.toMatchObject({ name: 'ValueError', message: /Set minAmountOut/ })
     expect(account.approve).not.toHaveBeenCalled()
     expect(account.sendTransaction).not.toHaveBeenCalled()
   })
@@ -602,7 +707,7 @@ describe('minimum output and signed deadline', () => {
   ])('refuses to send when Fynd %s', async (_name, flag, message) => {
     const { api, account, state } = harness()
     state[flag] = true
-    await expect(api.swidge(options)).rejects.toMatchObject({ reason: 'INVALID_TRANSACTION', message })
+    await expect(api.swidge(options)).rejects.toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', message })
     expect(account.sendTransaction).not.toHaveBeenCalled()
   })
 

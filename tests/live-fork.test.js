@@ -1,9 +1,12 @@
 // Copyright 2026 PropellerHeads AG
 
 // Opt-in: runs the adapter against Fynd and Tycho's deployed Ethereum router on an Anvil
-// mainnet fork. Set ETHEREUM_RPC_URL (a mainnet RPC that can serve recent state) and either
+// mainnet fork. Set ETHEREUM_RPC_URL (an archive mainnet RPC unless FORK_BLOCK_NUMBER=latest) and either
 // FYND_API_KEY for the hosted API or FYND_SELF_HOSTED_URL for your own Ethereum Fynd server.
-// No real funds move.
+// The fork is pinned to FORK_BLOCK_NUMBER (default below; `latest` forks the head) so the router
+// checks run against fixed state. Fynd still quotes live state, so quotes are not reproducible and
+// the swap allows 5% slippage for price drift since the pinned block. No real funds move.
+// Record the block and Fynd version of each verified run in docs/compatibility.md.
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
@@ -17,7 +20,10 @@ import { CHAINS, clientFeeTypedData } from '../src/router.js'
 const apiKey = process.env.FYND_API_KEY
 const selfHostedUrl = process.env.FYND_SELF_HOSTED_URL
 const forkUrl = process.env.ETHEREUM_RPC_URL
-const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
+// Mainnet block of November 27, 2026 (05:58 UTC); update together with docs/compatibility.md.
+const PINNED_FORK_BLOCK = '26504600'
+const forkBlock = process.env.FORK_BLOCK_NUMBER || PINNED_FORK_BLOCK
 // A fresh wallet funded on the fork only. Anvil's public dev accounts carry EIP-7702
 // delegations on mainnet, which the adapter refuses.
 const mnemonic = /** @type {import('ethers').Mnemonic} */ (Wallet.createRandom().mnemonic).phrase
@@ -28,7 +34,7 @@ const routerAbi = new Interface([
   'function sequentialSwap(uint256,address,address,uint256,uint256,address,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes)',
   'function splitSwap(uint256,address,address,uint256,uint256,uint256,address,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes)'
 ])
-const swap = { fromToken: ZeroAddress, toToken: USDC, fromTokenAmount: 10n ** 16n }
+const swap = { fromToken: ZeroAddress, toToken: USDT, fromTokenAmount: 10n ** 16n, slippage: 0.05 }
 
 let anvil, provider, wdk, account, fynd, sender
 
@@ -49,7 +55,8 @@ async function signedSwap () {
 describe.skipIf(!(apiKey || selfHostedUrl) || !forkUrl)('Fynd and the deployed Ethereum router on a mainnet fork', () => {
   beforeAll(async () => {
     const port = await freePort()
-    anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', ['--fork-url', String(forkUrl), '--port', String(port), '--chain-id', '1'], { stdio: 'ignore' })
+    const pin = forkBlock === 'latest' ? [] : ['--fork-block-number', forkBlock]
+    anvil = spawn(process.env.ANVIL_BIN ?? 'anvil', ['--fork-url', String(forkUrl), ...pin, '--port', String(port), '--chain-id', '1'], { stdio: 'ignore' })
     provider = new JsonRpcProvider(`http://127.0.0.1:${port}`, 1, { staticNetwork: true, cacheTimeout: -1 })
     for (let attempt = 0; ; attempt++) {
       try { await provider.getBlockNumber(); break } catch (error) { if (attempt > 200) throw error }
@@ -84,15 +91,15 @@ describe.skipIf(!(apiKey || selfHostedUrl) || !forkUrl)('Fynd and the deployed E
     expect(await router.CLIENT_FEE_TYPEHASH()).toBe(id(TypedDataEncoder.from(typed.types).encodeType('ClientFee')))
   }, 60000)
 
-  it('settles a signed ETH to USDC swap through the deployed router', async () => {
-    const usdc = new Contract(USDC, ['function balanceOf(address) view returns (uint256)'], provider)
-    const before = await usdc.balanceOf(sender)
+  it('settles a signed ETH to USDT swap through the deployed router', async () => {
+    const usdt = new Contract(USDT, ['function balanceOf(address) view returns (uint256)'], provider)
+    const before = await usdt.balanceOf(sender)
     const { result, submitted } = await signedSwap()
     const receipt = await account.waitForTransaction(result.hash, { target: 'confirmed', timeout: 30000 })
     expect(receipt.success).toBe(true)
     const fee = routerAbi.parseTransaction(submitted).args.clientFeeParams
     expect([fee[0], fee[1].toLowerCase(), fee[2]]).toEqual([0n, sender, 0n])
-    expect(await usdc.balanceOf(sender) - before).toBeGreaterThanOrEqual(result.toTokenAmountMin)
+    expect(await usdt.balanceOf(sender) - before).toBeGreaterThanOrEqual(result.toTokenAmountMin)
   }, 60000)
 
   it('lets the deployed router reject the signed swap after its deadline or with a changed signature', async () => {

@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
+import { ProviderError, ProviderErrorReason, ValueError } from '@tetherto/wdk-wallet'
 import { getAddress, Interface, ZeroAddress } from 'ethers'
 import { token } from './amounts.js'
 
 /** @typedef {(typeof CHAINS)[keyof typeof CHAINS]} Chain */
 /** @typedef {{ receiver: string, deadline: bigint }} ClientFee */
 
-// Addresses: tycho-execution 0.423.0, config/router_addresses.json.
+// Active TychoRouterV3 per chain in Tycho's deployment registry, effective 2026-11-16.
 // Source and upgrades: docs/compatibility.md#router-contract.
 export const CHAINS = Object.freeze({
-  ethereum: Object.freeze({ id: 1, name: 'Ethereum', router: '0x1644d2477f809cc2c71bccfd6dc9497e3f83210d', nativeSymbol: 'ETH' }),
-  base: Object.freeze({ id: 8453, name: 'Base', router: '0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67', nativeSymbol: 'ETH' }),
-  arbitrum: Object.freeze({ id: 42161, name: 'Arbitrum', router: '0x924f147c50ea59f5180a26031a8b65b2aa1e81cd', nativeSymbol: 'ETH' }),
-  bsc: Object.freeze({ id: 56, name: 'BNB Smart Chain', router: '0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e', nativeSymbol: 'BNB' }),
-  polygon: Object.freeze({ id: 137, name: 'Polygon', router: '0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1', nativeSymbol: 'POL' }),
-  unichain: Object.freeze({ id: 130, name: 'Unichain', router: '0xcba5574597ad00ea250fd106dab4fc7461949635', nativeSymbol: 'ETH' }),
-  robinhood: Object.freeze({ id: 4663, name: 'Robinhood Chain', router: '0x09215a470bd585e59eb3f4b612fbd2678131ff9e', nativeSymbol: 'ETH' })
+  ethereum: Object.freeze({ id: 1, name: 'Ethereum', router: '0xe41c726421007e133a59365432fe886a73b45126', nativeSymbol: 'ETH' }),
+  base: Object.freeze({ id: 8453, name: 'Base', router: '0xd374c00614f95492d816b5957e3797ce3f0c445c', nativeSymbol: 'ETH' }),
+  arbitrum: Object.freeze({ id: 42161, name: 'Arbitrum', router: '0x1b82e8c16ce8e17535c9b6b8ad107f61b0b192b5', nativeSymbol: 'ETH' }),
+  bsc: Object.freeze({ id: 56, name: 'BNB Smart Chain', router: '0xee7ece626064bda1c6afdb8a281afe44eabd3242', nativeSymbol: 'BNB' }),
+  polygon: Object.freeze({ id: 137, name: 'Polygon', router: '0x4db0b661dc706f7e09e54273028b22f61f8f94c2', nativeSymbol: 'POL' }),
+  unichain: Object.freeze({ id: 130, name: 'Unichain', router: '0x556dff14e4a42259ebce4fa087323c1047e9a55a', nativeSymbol: 'ETH' }),
+  robinhood: Object.freeze({ id: 4663, name: 'Robinhood Chain', router: '0x6f460540b03651d2ad0ec28f777e4a0480a756a5', nativeSymbol: 'ETH' })
 })
 
 const ROUTER_NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
@@ -58,9 +58,9 @@ const CLIENT_FEE_TYPES = Object.freeze({
   ]
 })
 
-/** @param {string} message */
-function invalid (message) {
-  return new SwidgeError(`Invalid Fynd transaction: ${message}`, { reason: 'INVALID_TRANSACTION' })
+/** Fynd calldata that does not match the request is a provider failure. @param {string} message @param {unknown} [cause] */
+function invalid (message, cause) {
+  return new ProviderError(`Invalid Fynd transaction: ${message}`, { reason: ProviderErrorReason.INTERNAL_SERVER_ERROR, cause })
 }
 
 /** @param {string} data */
@@ -93,8 +93,8 @@ export function validateTransaction (quote, request, chain, clientFee) {
     tokenOut = token(request.tokenOut)
     recipient = getAddress(request.recipient).toLowerCase()
     destination = getAddress(transaction.to).toLowerCase()
-  } catch {
-    throw invalid('invalid token, recipient or destination address')
+  } catch (error) {
+    throw invalid('invalid token, recipient or destination address', error)
   }
   if (destination !== chain.router || recipient === chain.router || recipient === ZeroAddress) {
     throw invalid('router or recipient does not match the supported wallet swap')
@@ -134,8 +134,8 @@ export function validateTransaction (quote, request, chain, clientFee) {
       throw invalid('empty or invalid swap route')
     }
   } catch (error) {
-    if (error instanceof SwidgeError) throw error
-    throw invalid('malformed calldata or unsupported router method')
+    if (error instanceof ProviderError) throw error
+    throw invalid('malformed calldata or unsupported router method', error)
   }
   return { to: destination, value: transaction.value, data: transaction.data }
 }
@@ -178,7 +178,7 @@ export function clientFeeTypedData (transaction, chain) {
  */
 export function insertSignature (transaction, offset, signature) {
   if (typeof signature !== 'string' || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
-    throw invalid('the wallet returned an invalid client-fee signature')
+    throw new ValueError('WDK returned an invalid client-fee signature.')
   }
   if (offset === undefined) throw invalid('Fynd returned no client-fee signature offset')
   const start = 2 + offset * 2

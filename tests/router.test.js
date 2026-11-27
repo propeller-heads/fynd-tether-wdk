@@ -166,7 +166,7 @@ describe('router call validation', () => {
       validate(test)
       throw new Error('validation unexpectedly passed')
     } catch (error) {
-      expect(error.reason).toBe('INVALID_TRANSACTION')
+      expect(error).toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR' })
       expect(error.message).not.toContain(test.quote.transaction.data)
     }
   })
@@ -245,6 +245,6 @@ describe('client-fee signing', () => {
 
   it.each([undefined, '0x', '0x' + 'ab'.repeat(64), '0x' + 'zz'.repeat(65)])('rejects wallet signature %s', signature => {
     const test = owned()
-    expect(() => insertSignature(validate(test, signer), test.offset, signature)).toThrow(/invalid client-fee signature/)
+    expect(() => insertSignature(validate(test, signer), test.offset, signature)).toThrow(/WDK returned an invalid client-fee signature/)
   })
 })

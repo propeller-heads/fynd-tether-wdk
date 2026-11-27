@@ -2,9 +2,13 @@
 
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { AbiCoder, Contract, Interface, JsonRpcProvider, MaxUint256, ZeroAddress, toBeHex } from 'ethers'
 import WDK from '@tetherto/wdk'
@@ -324,4 +328,46 @@ describe('published WDK account against local fixture contracts', () => {
     expect((await account.getTransaction(result.hash)).success).toBe(false)
     expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('failed')
   }, 15000)
+})
+
+describe('packed package under Bare', () => {
+  const repo = fileURLToPath(new URL('../', import.meta.url))
+  // Inside the repository, so the packed copy resolves its own dependencies from node_modules.
+  const consumer = join(repo, '.packed-consumer')
+
+  afterAll(() => rmSync(consumer, { recursive: true, force: true }))
+
+  it('registers, gets the protocol and executes a swidge from the packed Bare entry', async () => {
+    rmSync(consumer, { recursive: true, force: true })
+    const scope = join(consumer, 'node_modules', '@propellerheads')
+    mkdirSync(scope, { recursive: true })
+    const packDir = mkdtempSync(join(tmpdir(), 'fynd-pack-'))
+    try {
+      execFileSync('pnpm', ['pack', '--pack-destination', packDir], { cwd: repo, stdio: 'ignore' })
+      const [tarball] = readdirSync(packDir).filter(name => name.endsWith('.tgz'))
+      execFileSync('tar', ['-xzf', join(packDir, tarball), '-C', scope])
+    } finally {
+      rmSync(packDir, { recursive: true, force: true })
+    }
+    renameSync(join(scope, 'package'), join(scope, 'wdk-protocol-swidge-fynd'))
+    // Its own package scope, so the import resolves to the packed copy rather than a self-reference.
+    writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'packed-consumer', private: true, type: 'module' }))
+    for (const file of ['runtime-swidge.mjs', 'runtime-swidge-bare.mjs']) cpSync(new URL(file, import.meta.url), join(consumer, file))
+    const before = await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)
+    // Async, so this process's mock Fynd server keeps answering.
+    const { stdout } = await promisify(execFile)(join(repo, 'node_modules/.bin/bare'), [join(consumer, 'runtime-swidge-bare.mjs')], {
+      cwd: consumer, encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, RPC_URL: rpcUrl, FYND_BASE_URL: baseUrl, TO_TOKEN: outputToken, RECIPIENT: recipient }
+    })
+    const result = JSON.parse(stdout.trim())
+    expect(result).toMatchObject({
+      runtime: 'bare', instance: true,
+      module: `file://${join(scope, 'wdk-protocol-swidge-fynd', 'bare.js')}`
+    })
+    await wait(result.hash)
+    const submitted = await provider.getTransaction(result.hash)
+    expect(submitted.to.toLowerCase()).toBe(router)
+    expect(submitted.value).toBe(inputAmount)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient) - before).toBe(grossOutput)
+  }, 60000)
 })

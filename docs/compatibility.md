@@ -4,15 +4,17 @@
 
 ## Dependencies and runtime
 
-| Dependency | Version |
-| --- | --- |
-| `@tetherto/wdk` | `1.0.0-beta.19` |
-| `@tetherto/wdk-wallet` | `^1.0.0-beta.23` |
-| `@tetherto/wdk-wallet-evm` | `1.0.0-beta.21` |
-| `ethers` | `6.17.0` |
-| `bare-node-runtime` | `1.5.1` |
+| Dependency | Kind | Version |
+| --- | --- | --- |
+| `@tetherto/wdk-wallet` | dependency | `^1.0.0-beta.23` |
+| `ethers` | dependency | `6.17.0` |
+| `bare-node-runtime` | dependency | `1.5.1` |
+| `@tetherto/wdk-wallet-evm` | optional peer; tests use `1.0.0-beta.21` | `^1.0.0-beta.21` |
+| `@tetherto/wdk` | dev only; the app supplies core | `1.0.0-beta.19` |
 
-ESM JavaScript, JSDoc-generated declarations, Node.js 22+, and a conditional Bare entrypoint.
+`@tetherto/wdk-wallet-evm` appears only in JSDoc types, and each release pins `@tetherto/wdk-wallet` exactly. As a dependency it would install a second `wdk-wallet` in every app. The module never imports core, so `@tetherto/wdk` is only a dev dependency.
+
+The package is ESM JavaScript with committed, hand-maintained declarations in `types/`. It needs Node.js 22+ or Bare 1.35+, and Bare loads it through a conditional entrypoint.
 
 `@tetherto/wdk-wallet` is a caret range on purpose. `WDK.registerProtocol` checks `instanceof SwidgeProtocol` against core's copy of `@tetherto/wdk-wallet`, and core declares a caret range, so the module must resolve the same copy. EVM beta.21 pins its own wallet beta.21, so account errors can come from a second copy and cross-package `instanceof` checks on them are unreliable.
 
@@ -24,13 +26,19 @@ WDK has no public `quoteApprove`. The module passes no gas overrides to `approve
 
 ## Errors and legacy helpers
 
-The module throws WDK's `ValueError`, `InvalidTokenError`, `AccountRequiredError`, `ReadOnlyAccountRequiredError`, `MaximumFeeExceededError`, `ProviderError`, `SwidgeError` and `NotImplementedError`. `FyndExecutionError` adds transaction progress; inherited legacy wrappers expose it through `cause`.
+The module throws WDK's `ValueError`, `InvalidTokenError`, `AccountRequiredError`, `ProviderRequiredError`, `MaximumFeeExceededError`, `ProviderError` and `SwidgeError`. `FyndExecutionError` adds transaction progress; inherited legacy wrappers expose it through `cause`. Translated errors keep the original as `cause`. That includes `fetch` failures: Node and Bare causes name the failure (refused, DNS, TLS, redirect, reset) and carry no request headers, and `baseUrl` cannot hold credentials. HTTP error bodies are never included. A `JSON.parse` cause for a malformed 2xx body quotes a short excerpt: about 10 characters on each side of the parse error.
+
+RPC failures from account reads become `ProviderError`: ethers `NETWORK_ERROR`, `SERVER_ERROR` and `TIMEOUT`, socket errors such as `ECONNREFUSED` and `ENOTFOUND` that ethers passes through, and JSON-RPC errors such as rate limits (`INTERNAL_SERVER_ERROR`). ethers files every `eth_call` JSON-RPC error as `CALL_EXCEPTION`, so an allowance call becomes `InvalidTokenError` only when it carries revert data or a revert message, or returns undecodable data. Only simulation failures (`CALL_EXCEPTION`, `INSUFFICIENT_FUNDS`) fall back to Fynd's gas estimate; a rate-limited gas estimate is also a `CALL_EXCEPTION`, so it falls back too, with the fee marked incomplete. Other errors pass through unchanged.
+
+`reason` values come from `ProviderErrorReason` and `SwidgeErrorReason`, plus five Swidge reasons WDK does not define yet: `NO_ROUTE_FOUND`, `INSUFFICIENT_LIQUIDITY`, `FEE_ESTIMATE_UNAVAILABLE`, `APPROVAL_FAILED` and `EXECUTION_IN_PROGRESS`. They are proposed for `SwidgeErrorReason`.
 
 WDK's legacy scalar fee adds unlike token denominations. Use Swidge's itemized fees. See [fees and failures](../README.md#fees-and-failures).
 
 ## Router contract
 
-Addresses and ABI follow `tycho-execution 0.423.0`: [deployments](https://github.com/propeller-heads/tycho/blob/8be328bfc02c6f46cf39f60ef8b31cbb5d1b0d39/crates/tycho-execution/config/router_addresses.json), [TychoRouterV3](https://github.com/propeller-heads/tycho/blob/8be328bfc02c6f46cf39f60ef8b31cbb5d1b0d39/crates/tycho-execution/contracts/src/TychoRouterV3.sol). The seven addresses matched the [router registry](https://raw.githubusercontent.com/propeller-heads/tycho/main/crates/tycho-execution/config/deployment_registry.json) on October 13, 2026.
+The seven addresses are the active TychoRouterV3 deployments in Tycho's [deployment registry](https://raw.githubusercontent.com/propeller-heads/tycho/main/crates/tycho-execution/config/deployment_registry.json) (registry version 2026-11-23), effective November 16, 2026 ([deployment record](https://github.com/propeller-heads/tycho/commit/8aab890549e09358f5de1b3fc3eb3d6af9906a92)). Tycho redeployed every router that day to fix a vault-accounting vulnerability, without the usual 30-day notice, and listed the previous routers as superseded. The new routers are built from [TychoRouterV3 at `94845b6a`](https://github.com/propeller-heads/tycho/blob/94845b6ac42b6dbe3007f4f380c21d64dd47a443/crates/tycho-execution/contracts/src/TychoRouterV3.sol). Against the earlier [`tycho-execution 0.423.0` source](https://github.com/propeller-heads/tycho/blob/8be328bfc02c6f46cf39f60ef8b31cbb5d1b0d39/crates/tycho-execution/contracts/src/TychoRouterV3.sol), `ClientFeeParams`, `CLIENT_FEE_TYPEHASH`, `_verifyClientSignature` and the `singleSwap`, `sequentialSwap` and `splitSwap` signatures are unchanged, so only the addresses changed here. On November 27, 2026, each of the seven addresses had code on its chain with the `TychoRouter` version `1` EIP-712 domain for that chain, the expected `CLIENT_FEE_TYPEHASH` and all three swap selectors.
+
+Tycho can replace a router again. When it does, the module rejects every quote until a release updates the pins, because `/info` reports a router that differs from the pinned one.
 
 Approvals target the pinned router. Validation checks the outer call arguments and rejects unknown selectors; nested routes depend on Fynd and the router's executors.
 
@@ -38,7 +46,12 @@ The router enforces a deadline only when the client-fee receiver is nonzero (`_v
 
 Quotes are never signed or sent, so they request no client-fee parameters and accept any zero-fee parameters Fynd chooses.
 
-`tests/live-fork.test.js` checked this on October 13, 2026 against the deployed Ethereum router, with both the hosted API (Fynd 0.111.1) and a self-hosted Fynd 0.108.0: the on-chain EIP-712 domain and `CLIENT_FEE_TYPEHASH` match, a signed swap settles, and the router rejects it after the deadline or with a changed signature.
+`tests/live-fork.test.js` checks this against the deployed Ethereum router: the on-chain EIP-712 domain and `CLIENT_FEE_TYPEHASH` match, a signed ETH to USDT swap settles, and the router rejects it after the deadline or with a changed signature. The fork is pinned to `FORK_BLOCK_NUMBER`, which fixes the router code and state these checks run against. Fynd quotes live state, so a run's quote and route cannot be reproduced. The swap allows 5% slippage for price movement since the pinned block, and the settlement check can fail once the block is old enough that routes use newer pools; re-pin to a recent block then. Record each run's block and Fynd version (`version` from `/info`) below.
+
+| Date | Fork block | Fynd | Result |
+| --- | --- | --- | --- |
+| October 13, 2026 | latest (unpinned), ETH to USDC | hosted 0.111.1, self-hosted 0.108.0 | Passed |
+| November 27, 2026 | 26504600 (pinned default) | hosted 0.129.3 | Failed: all three tests stopped at the `/info` router check, because the pins still named the routers Tycho superseded on November 16 |
 
 ## Hosted and self-hosted Fynd
 
@@ -55,4 +68,4 @@ The hosted gateway serves each chain at `/v1/{slug}` and needs an API key. A sel
 - **WDK:** review published account methods, chain population, approvals, typed-data signing, receipts, errors and Swidge types. Check class identity, direct account construction and registration in a fresh packed consumer.
 - **Fynd:** compare deployed responses with parser fixtures, including slippage, fee arithmetic, the signature offset, gas units, token discovery and timeout and error handling. Run the live fork test.
 - **Router:** compare deployed code, ABI, EIP-712 domain, client-fee type and fee behavior against the pinned sources. Update constants, validator, fixture router and tests together.
-- **Package:** rebuild declarations; test exports, cap boundaries, approvals, partial failures, status and discovery. Run Node and Bare checks, audit dependencies and inspect the pack for secrets. Record changed contracts in the changelog.
+- **Package:** update `types/` by hand for changed JSDoc; test exports, cap boundaries, approvals, partial failures, status and discovery. Run Node and Bare checks, audit dependencies and inspect the pack for secrets. Record changed contracts in the changelog.
