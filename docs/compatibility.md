@@ -86,7 +86,7 @@ The hosted gateway serves each chain at `/v1/{slug}` and needs an API key. A sel
 ## Unresolved
 
 - Not yet published to npm.
-- Whether RFQ routes need more gas than WDK's estimate on live chains. In fork replays of raw Fynd transactions, two RFQ routes (Base and Arbitrum) ran out of gas at the exact estimate and succeeded with more. The module passes no gas overrides, so WDK's estimate sets the limit.
+- Whether some routes need more gas than WDK's estimate on live chains. In fork replays of raw Fynd transactions, three routes failed at Anvil's exact estimate and succeeded with twice the gas: an RFQ route on Base, a PancakeSwap v3 route on Arbitrum, and a Base Aerodrome pool whose hook reverted with `IG` well below the limit. The module passes no gas overrides, so WDK's estimate sets the limit.
 - Tether's Generic Implementation Requirements document has not been reviewed.
 - Tether confirmation for exact-input scope, account binding, fee estimates and caps, legacy fees, original-hash status and token discovery semantics.
 
