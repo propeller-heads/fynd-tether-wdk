@@ -72,7 +72,7 @@ import { FyndExecutionError } from './errors.js'
 const ERC20 = new Interface(['function approve(address spender,uint256 amount) returns (bool)'])
 const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
 // Chains without an L1 data fee, where WDK's gas estimate covers the whole network cost.
-const COMPLETE_FEE_ESTIMATE_CHAINS = new Set([1, 56, 137])
+const COMPLETE_FEE_ESTIMATE_CHAINS = new Set([1, 56, 137, 5042])
 // WDK takes each nonce from the pending transaction count, so overlapping executions from one
 // sender could sign the same nonce. One execution per chain and sender runs at a time.
 const EXECUTING_SENDERS = new Set()

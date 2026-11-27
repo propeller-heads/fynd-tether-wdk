@@ -13,19 +13,21 @@ It implements `ISwidgeProtocol` from `@tetherto/wdk-wallet` `^1.0.0-beta.23`. Yo
 
 ## Supported chains
 
-Matches the [hosted API's chain list](https://github.com/propeller-heads/fynd/blob/main/docs/get-started/hosted-api.md#supported-chains) as of October 13, 2026. New chains require a module release.
+Covers every chain hosted Fynd serves as of November 27, 2026: the eight in the [hosted API's chain list](https://github.com/propeller-heads/fynd/blob/main/docs/get-started/hosted-api.md#supported-chains), plus Arc, which the gateway serves but the list does not name yet. Tycho also has a router on Plasma, but hosted Fynd does not serve Plasma, so the module does not support it. New chains require a module release.
 
-| Chain | ID | API slug | Native token | Live test |
+| Chain | ID | API slug | Native token | Live fork swap |
 | --- | ---: | --- | --- | --- |
-| Ethereum | 1 | `ethereum` | ETH | Mainnet fork with the hosted API and the deployed router |
-| Base | 8453 | `base` | ETH | Untested |
-| Arbitrum | 42161 | `arbitrum` | ETH | Untested |
-| BNB Smart Chain | 56 | `bsc` | BNB | Untested |
-| Polygon | 137 | `polygon` | POL | Untested |
-| Unichain | 130 | `unichain` | ETH | Untested |
-| Robinhood Chain | 4663 | `robinhood` | ETH | Untested |
+| Ethereum | 1 | `ethereum` | ETH | ETH to USDT, settled |
+| Base | 8453 | `base` | ETH | ETH to USDT, settled |
+| Arbitrum | 42161 | `arbitrum` | ETH | ETH to USD₮0, settled |
+| BNB Smart Chain | 56 | `bsc` | BNB | BNB to USDT, settled |
+| Polygon | 137 | `polygon` | POL | POL to USDT0, settled |
+| Unichain | 130 | `unichain` | ETH | ETH to USD₮0, settled |
+| Robinhood Chain | 4663 | `robinhood` | ETH | ETH to USDG, settled |
+| Arc | 5042 | `arc` | USDC | USDC to EURC, settled in one of two runs |
+| Elysium | 99901 | `elysium` | HYPE | HYPE to USDC, settled |
 
-Every chain passes the local suite: its chain ID, slug and router address, and a signed native-input swap through a fixture router on Anvil. Only Ethereum has run against live Fynd and a deployed router, because the live test forks Ethereum mainnet only; each other chain would need its own RPC and fork setup. The other chains have had no live quote or read yet, so the hosted API's routes, their deployed routers and their gas behavior are unverified.
+Every chain passes the local suite: its chain ID, slug and router address, and a signed native-input swap through a fixture router on Anvil. On November 27, 2026, every chain also settled a signed swap from a live hosted Fynd quote (0.129.3) through its deployed router on an Anvil fork, and the router rejected that swap after its deadline. Fork runs depend on the route Fynd picks, because Anvil does not reproduce everything these chains do; on Arc, routes that move ERC-20 USDC revert on a fork. See [live fork runs](docs/compatibility.md#live-fork-runs).
 
 `getSupportedTokens()` lists the tokens Fynd tracks on the configured chain: quality 100, zero transfer tax, plus the native token.
 
@@ -172,7 +174,7 @@ Token discovery uses Fynd's experimental `/tokens` endpoint. A changed block or 
 
 Same-chain swaps have no bridge fee, and the legacy `bridge`/`quoteBridge` helpers are unsupported. WDK's legacy `swap` helpers add both fees into one number in different tokens, so use Swidge's itemized fees. Positive slippage can increase the settled router fee.
 
-`networkFeeComplete` is true only with an account, no pending approval and a successful WDK estimate on Ethereum, BNB Smart Chain or Polygon. On Base, Arbitrum, Unichain and Robinhood Chain the estimate misses the L1 data fee. Without a WDK estimate, Fynd's gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
+`networkFeeComplete` is true only with an account, no pending approval and a successful WDK estimate on Ethereum, BNB Smart Chain, Polygon or Arc. Base, Arbitrum, Unichain, Robinhood Chain and Elysium also charge for parent-chain data, so their estimates never count as complete. Without a WDK estimate, Fynd's gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
 
 Caps apply only to execution. The protocol cap compares the router fee with gross output. The network cap needs a complete estimate as above; it compares cost with the native input or an input-to-native valuation quote, and otherwise rejects before any write. Per-call caps override constructor values; `undefined` inherits, and zero remains active.
 
@@ -225,7 +227,7 @@ pnpm lint
 pnpm test
 ```
 
-Tests need Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and loopback ports. They run fixture contracts, Node and Bare locally. `tests/live-fork.test.js` also runs against the hosted API and Tycho's deployed Ethereum router on a mainnet fork when `FYND_API_KEY` and `ETHEREUM_RPC_URL` are set; it pins the fork to `FORK_BLOCK_NUMBER`, so `ETHEREUM_RPC_URL` must be an archive RPC (see `.env.example`).
+Tests need Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and loopback ports. They run fixture contracts, Node and Bare locally. `tests/live-fork.test.js` also runs against the hosted API and Tycho's deployed routers, on an Anvil fork of each chain whose `<CHAIN>_RPC_URL` is set, when `FYND_API_KEY` is set. The Ethereum fork is pinned to `ETHEREUM_FORK_BLOCK_NUMBER`, so `ETHEREUM_RPC_URL` must be an archive RPC; other chains fork their latest block (see `.env.example`).
 
 `types/` is committed and edited by hand. Update the declarations that change with each JSDoc change, and review them in the pull request. `pnpm typecheck` checks them through the package's own export map. `pnpm build:types` regenerates the whole tree only as a starting point.
 

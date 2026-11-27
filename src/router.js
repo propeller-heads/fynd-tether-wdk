@@ -28,7 +28,9 @@ export const CHAINS = Object.freeze({
   bsc: Object.freeze({ id: 56, name: 'BNB Smart Chain', router: '0xee7ece626064bda1c6afdb8a281afe44eabd3242', nativeSymbol: 'BNB' }),
   polygon: Object.freeze({ id: 137, name: 'Polygon', router: '0x4db0b661dc706f7e09e54273028b22f61f8f94c2', nativeSymbol: 'POL' }),
   unichain: Object.freeze({ id: 130, name: 'Unichain', router: '0x556dff14e4a42259ebce4fa087323c1047e9a55a', nativeSymbol: 'ETH' }),
-  robinhood: Object.freeze({ id: 4663, name: 'Robinhood Chain', router: '0x6f460540b03651d2ad0ec28f777e4a0480a756a5', nativeSymbol: 'ETH' })
+  robinhood: Object.freeze({ id: 4663, name: 'Robinhood Chain', router: '0x6f460540b03651d2ad0ec28f777e4a0480a756a5', nativeSymbol: 'ETH' }),
+  arc: Object.freeze({ id: 5042, name: 'Arc', router: '0x52a1bc20f2b78461d7a03c32f6c7388d4587980f', nativeSymbol: 'USDC' }),
+  elysium: Object.freeze({ id: 99901, name: 'Elysium', router: '0x643577f3b0cb8ce1b1b73c6e872b907acacd2662', nativeSymbol: 'HYPE' })
 })
 
 const ROUTER_NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'

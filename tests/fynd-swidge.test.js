@@ -24,7 +24,8 @@ const HOSTED_CHAINS = [
   [1, 'ethereum', 'Ethereum', 'ETH'], [8453, 'base', 'Base', 'ETH'],
   [42161, 'arbitrum', 'Arbitrum', 'ETH'], [56, 'bsc', 'BNB Smart Chain', 'BNB'],
   [137, 'polygon', 'Polygon', 'POL'], [130, 'unichain', 'Unichain', 'ETH'],
-  [4663, 'robinhood', 'Robinhood Chain', 'ETH']
+  [4663, 'robinhood', 'Robinhood Chain', 'ETH'], [5042, 'arc', 'Arc', 'USDC'],
+  [99901, 'elysium', 'Elysium', 'HYPE']
 ]
 // Independent outer ABI fixture, matching TychoRouterV3 as deployed on November 16, 2026 (unchanged since tycho-execution 0.423.0).
 const abi = new Interface([
@@ -550,7 +551,7 @@ describe('requested fee caps', () => {
     await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name: 'ProviderError', reason: 'INTERNAL_SERVER_ERROR', cause: outage })
   })
 
-  it.each([56, 137])('applies network caps on chain %i, which has no L1 data fee', async chainId => {
+  it.each([56, 137, 5042])('applies network caps on chain %i, which has no L1 data fee', async chainId => {
     const { api, account } = harness({ chainId })
     await expect(api.quoteSwidge(options)).resolves.toMatchObject({ networkFeeComplete: true })
     await expect(api.swidge({ ...options, fromToken: ZeroAddress }, { maxNetworkFeeBps: 99 })).rejects.toMatchObject({ name: 'MaximumFeeExceededError' })
@@ -558,7 +559,7 @@ describe('requested fee caps', () => {
     expect(account.sendTransaction).toHaveBeenCalledTimes(1)
   })
 
-  it.each(HOSTED_CHAINS.filter(([id]) => ![1, 56, 137].includes(id)))('rejects unverified network caps on chain %i (%s)', async (chainId) => {
+  it.each(HOSTED_CHAINS.filter(([id]) => ![1, 56, 137, 5042].includes(id)))('rejects unverified network caps on chain %i (%s)', async (chainId) => {
     const { api, account } = harness({ chainId })
     await expect(api.swidge(options, { maxNetworkFeeBps: 10000 })).rejects.toMatchObject({ reason: 'FEE_ESTIMATE_UNAVAILABLE' })
     expect(account.sendTransaction).not.toHaveBeenCalled()
